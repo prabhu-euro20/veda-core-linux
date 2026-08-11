@@ -57,11 +57,27 @@ bounded ODT index window. ODT entry and PCC deliberately stay narrow (lossless z
 truncate bridges) so the atomic change stayed as small as possible. Results:
 `veda-core/PHASE1_SAIL_RESPEC_256BIT_RESULTS.md`.
 
-**Next increment: widen the ODT entry + redesign ODT-Populate's operand model** (Base56 +
-Length40 + Perms16 = 112 bits no longer fits one GPR; `veda_attr` must widen to 64 bits), and
-widen PCC in the same change (that is when the `VEDA_PCC_UNBOUNDED` sentinel value changes).
-Until then the ODT's own widths, not the capability format, remain the real limit on object
-size and count.
+**Increment 3 (2026-08-11): widen the ODT entry, populate, and PCC -- DONE, verified in Sail.**
+`odt_entry.Base` 32->56, `odt_entry.Length` 16->40, `veda_attr` 32->64 (Length[55:16] |
+Perms[15:0], backward-compatible by construction), PCC/mepcc base->56 / length->40,
+`VEDA_PCC_UNBOUNDED` 0xFFFF->0xFFFFFFFFFF. **This is where the 4 GiB and 64 KiB walls actually
+fall in behaviour** (increment 2 removed them only in the format). Plain `populate` stays the
+compact single-GPR form (existing programs unchanged); `populate.fast` is now the wide path.
+**70/70 self-check** -- incl. a new `vc_large_object` test (128 KiB object, access beyond the
+old 64 KiB limit, bound still enforced at the new limit). Generation deliberately stays 8 bits
+(deferred: widening it makes the `vc_gen_retire` saturation loops infeasible -- needs its own
+increment + a non-looping test strategy). The sentinel width change broke 16 compartment tests;
+all diagnosed against the running sim by 16 parallel agents under a "report a real bug rather
+than invent a fix" rule -- **zero real bugs**, all the documented semantic change, corpus
+independently re-verified 70/70. Surfaced a real design wart (returning to unbounded PCC now
+needs a synthesised max-length object; the compact descriptor can't express the sentinel) --
+recorded in DESIGN_01 as an open question (should OCRETURN restore saved bounds?), flagged not
+fixed. Results: `veda-core/PHASE1_SAIL_RESPEC_ODT_WIDEN_RESULTS.md`.
+
+**Next increment: widen generation (8 -> 24) + redesign how retirement is tested** (the current
+saturation tests loop to the threshold; 16.7M iterations is not a test). After that, the ODT
+index window / segmented-Object_ID (DESIGN_06) is the remaining piece before the 44-bit
+namespace is fully backable, not just expressible.
 
 
 The current 128-bit format cannot express Linux-scale anything: Length 16b caps objects at

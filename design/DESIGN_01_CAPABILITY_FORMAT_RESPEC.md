@@ -122,6 +122,37 @@ Base/Length/Offset untouched; `vc_candperm_neg.S`: a `CSealEntry`-sealed source 
 with Tag=0). Both were mutation-tested (see the milestone results doc) so they cannot pass
 vacuously.
 
+## Finding surfaced by increment 3 -- "return to unbounded" needs its own mechanism
+
+Widening the compartment-bounds registers exposed a latent design wart that was invisible
+while every field was 16 bits.
+
+PCC's "no compartment active" state is encoded as `veda_pcc_length == all-ones`. Leaving a
+compartment is therefore done by `OCInvoke`/`OCRETURN` **through a code object whose Length is
+the saturated value** -- the caller has to synthesise a max-length object purely to say
+"unbounded". That worked incidentally when Length was 16 bits, because `0xFFFF` was both a
+plausible literal and the sentinel.
+
+At 40 bits it no longer does, for a concrete reason: **the compact single-GPR populate
+descriptor has a 16-bit Length field and can no longer express the sentinel at all.** Creating
+an unbounded code object now requires the wide populate path. Every test that used the old
+idiom had to be converted, which is a strong smell -- an operation as ordinary as "return from
+a compartment" should not require constructing a specially-shaped object.
+
+This is not a bug and increment 3 does not change it (the sentinel remains all-ones, which is
+the semantically correct choice -- keeping the old numeric value would have made a legitimate
+65535-byte compartment read as unbounded). But it is a real design question worth its own
+increment:
+
+- Should `OCRETURN` **restore** the previously-saved bounds rather than take them from its
+  operand capability? There is already precedent in the trap path (`veda_mepcc_base/_length`
+  save-and-restore), and it would make compartment exit symmetric with compartment entry
+  instead of requiring a synthesised object.
+- Who is authorised to decide the restored bounds is the real security question, and is
+  exactly why this needs analysis rather than a quick change.
+
+Recorded here so the awkwardness is not silently normalised by having "fixed" the tests.
+
 ## Generation vs churn (why 24 bits, honestly)
 
 Even 24-bit generation is finite. Linux allocates continuously. Two mechanisms combine:
