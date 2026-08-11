@@ -188,6 +188,13 @@ the real files. Adopted radical decisions, attached to the phases above:
   sweeping revocation** (hardware sweep engine; the concrete form of DESIGN_06's Cornucopia
   item, must include the CRF in scope), **Rev-E range-gate all capability memory paths +
   validate ODT-Populate Base**. All co-depend on the 44-bit ID / 256-bit format.
+- **Phase 1 (also) + Phase 7**: **R9 CRF entry-count under purecap** -- the frozen verdict's
+  16-entry §2 rationale (object-handle pressure, cheap re-Bind) does NOT transfer to purecap
+  (Bind does not restore a pointer's Offset), but 16 is NOT shown insufficient (overflow spills
+  bounded TCM-tier via OCS.C/OCL.C; CHERI's 32 is ISA congruence, not a pressure bar). Action:
+  reserve the already-5-bit-shaped index pad bits + close the Sail/RTL decode divergence in the
+  Phase-1 respec (cheap, but the bits are decided now, not deferrable); a Phase-7 purecap
+  spill-traffic study decides 16-vs-32 -- not an a-priori widening.
 - **Phase 4**: **R5 provably-non-speculative capability enforcement** -- a new 6th pillar,
   landed as a DESIGN_04 pipeline contract *before* Phase 4 RTL (the check gates access, not a
   post-hoc trap; capability micro-ops serialize at issue).

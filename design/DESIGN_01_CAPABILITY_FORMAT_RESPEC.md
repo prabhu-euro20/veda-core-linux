@@ -52,6 +52,46 @@ narrower generation.
 needs a real derivation pass (CHERI's own Concentrate took dedicated work); do it only
 if silicon area later demands 128-bit.
 
+## CRF entry count (16 vs 32) -- a separate axis, but decide the index width NOW
+
+Entry *count* is orthogonal to field *width* above -- count is a register-index/encoding
+decision, width is a field-width decision -- but both live in this respec because the
+capability-index field is part of the same instruction formats. Verified against the real
+Sail/RTL/LLVM (adversarial pass, 2026-08-11):
+
+- **The format is already 5-bit-shaped.** Every capability operand is a standard RISC-V
+  5-bit register slot whose MSB is a hardcoded `0b0` pad: Sail encodes `0b0 @ encdec_vcap(...)`
+  (`veda_cap_insts.sail:23/174/248`, `veda_ocl_insts.sail`, `veda_bind_insts.sail:104`);
+  RTL slices only the low 4 bits, skipping pads `instr[11]/[19]/[24]`
+  (`$veda_rd_cap[3:0]=$instr[10:7]`, `rs1_cap=$instr[18:15]`, `rs2_cap=$instr[23:20]`); LLVM
+  uses stock 5-bit fields with `C0-C15` = 0-15. **Going to 32 needs NO instruction-format
+  change**: `vcapidx` bits(4)->bits(5) reclaiming the existing pad bits, RTL `/vreg[15:0]`
+  -> `[31:0]` (`veda_core.tlv:1411`) plus `[3:0]`->`[4:0]` slices, and `C16-C31` LLVM defs.
+  Backward compatible by construction -- shipped binaries carry 0 in the new MSB and decode
+  identically to `c0-c15`.
+- **Timing rule (load-bearing):** because widening reinterprets the currently-reserved
+  `0b0` pad bits as index bits, the 16-vs-32 choice must be made **during this respec**, not
+  deferred to Phase 7. Deferring means shipping 16-entry hardware whose decode silently
+  aliases any future `c16-c31` encoding to `c0-c15`. Even if the decision is **stay at 16 for
+  now** (recommended -- see below), this doc must **reserve the pad bits as
+  index-extension-reserved** so the door stays open.
+- **One concrete cheap fix, independent of 16-vs-32 (do it in the Sail respec):** close a
+  real Sail/RTL decode divergence. Sail already traps a nonzero pad bit as an encdec no-match
+  (illegal instruction -- correct forward-compat), but the RTL ignores `instr[11]/[19]/[24]`.
+  Add a decode-guard so 16-entry RTL **traps** on a nonzero capability-index MSB instead of
+  aliasing to `c0-c15`, making any future `c16-c31` opcode fail-closed on old hardware.
+- **Do NOT widen the CRF pre-emptively.** The frozen CRF verdict's own §2 justification for
+  16 (pressure = simultaneously-live *object-handles*, cheaply re-derivable via Bind) is
+  specific to the object-handle codegen model and does **not** transfer to DESIGN_05 Part A
+  purecap, where a pointer is a capability-*with-offset* and Bind does not restore the offset
+  -- so under purecap the rationale must be rewritten (see DESIGN_07 R9). But under purecap,
+  pressure beyond 16 does not *fail*: it saturates at the allocatable limit and spills as
+  bounded, TCM-tier traffic via OCS.C/OCS.C into the M24 capability-spill scratch. 16-entry
+  register files are routine compiler targets, and CHERI's 32 is MIPS-ISA congruence, not a
+  sized pressure figure -- so 32 is **not** a benchmark 16 must meet. Decide 16-vs-32 from a
+  real Phase-7 purecap spill-traffic study, not a priori. **This respec's job is only to
+  reserve the index bits and close the decode divergence, keeping the cheap door open.**
+
 ## New instruction -- CAndPerm (rights attenuation)
 
 The current 36-instruction set has **no per-holder rights attenuation**. Real CHERI has

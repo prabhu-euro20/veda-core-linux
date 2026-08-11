@@ -354,6 +354,46 @@ ahead of any multi-master hardware.
 
 ---
 
+## Tier F -- forward-scaling correctness (a rationale gap, NOT a security/threat finding)
+
+Surfaced by a direct design question ("is 16 CRF entries a future overhead?"), then run
+through the same adversarial-verify discipline as the security findings. Labeled honestly:
+this is a correctness/rationale/scaling item, not an attack surface.
+
+### R9. The 16-entry CRF rationale does not transfer to purecap -- but 16 is not shown insufficient
+
+**The gap (real).** The frozen CRF verdict justifies 16 entries partly on a §2 argument
+specific to the *object-handle* codegen model: pressure = simultaneously-live object-handles,
+cheaply re-derivable via Bind from the ODT. That leg does **not** carry to DESIGN_05 Part A
+purecap, where every C pointer is a capability-*with-offset*: Bind restores
+Tag/Base/Length/Perms/otype but **not** the Offset, so re-Bind stops substituting for
+holding/spilling a live pointer value. The verdict is also literally silent on purecap (zero
+"purecap" hits; its §6 escape clause frames the revisit trigger as an empirical workload-shape
+unknown and never names this structural pointer=capability pressure-conversion, which is
+knowable a priori).
+
+**The honest correction (this is where the original finding was overstated).** This is a
+*rationale gap + a forward spill-cost question*, **not** a demonstrated insufficiency. Under
+purecap, CRF pressure beyond the allocatable limit does not fail -- it saturates and spills as
+bounded, **TCM-tier** traffic via OCS.C/OCL.C into the already-built M24 capability-spill
+scratch (the cache-less analogue of CHERI's cheap CSC/CLC). 16-entry register files are
+routine, well-served compiler targets. And CHERI's 32 is **MIPS-ISA congruence, not a sized
+register-pressure figure** (the frozen verdict's own Addendum says so) -- so 32 is not a
+benchmark 16 must meet. **Do not claim 16 is insufficient; do not cite 32 as the bar.**
+
+**Actions.** (1) *Now, in the DESIGN_01 respec:* reserve the capability-index pad bits as
+index-extension-reserved and close the Sail/RTL decode divergence (RTL must trap a nonzero
+index MSB, not alias `c16-c31` to `c0-c15`) -- the format is already 5-bit-shaped, so the
+32-entry door is cheap but its bits are decided here, not deferrable to Phase 7. See DESIGN_01
+"CRF entry count (16 vs 32)". (2) *Phase 7:* a quantitative purecap **spill-traffic** study
+(simultaneously-live capability-register pressure over per-function live ranges on a purecap
+corpus, and resulting OCS.C/OCL.C volume against the TCM scratch), plus a rewritten SPEC §2
+rationale that no longer leans on Bind-re-derivation for pointer values. That study -- not an
+a-priori widening -- decides 16 vs 32. **Pillars:** untouched (index-bit reservation + a
+decode guard; no cache, no raw address). **Attaches to:** DESIGN_01 (bits) + Phase 7 (study).
+
+---
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
