@@ -32,7 +32,19 @@ builds exactly that, without giving up a pillar.
 
 ## Phase sequence (dependency-ordered, from DESIGN_06)
 
-### Phase 1 -- Capability format respec (DESIGN_01) -- IN PROGRESS
+### Phase 1 -- Capability format respec (DESIGN_01) -- COMPLETE (Sail layer), 2026-08-11
+
+All four capability-format walls plus the retirement wall are removed in behaviour, and the
+last open architectural question -- the ODT scale/flat/deterministic trilemma -- is decided
+(DESIGN_08) and validated in Sail. Increments 1-4 (CAndPerm, 256-bit format, ODT/populate/PCC
+widen, generation widen) each built and mutation-tested; the DESIGN_08 domain-segmented
+Object_ID mechanism (region table + CRBR + region fault) is expressed and its three invariants
+machine-checked, all at 72/72 self-check with zero regressions. What remains before Phase 1 can
+be called fully closed is the RTL mirror of this Sail work (Phase 1 was Sail-first by design)
+and the DESIGN_08 Section-9 open items (a DRAM cost model to measure the cross-domain read,
+shared-region residency policy, MSA-private-RT as a verified invariant, region-grant authority,
+RT-entry MAC, and reclamation), which are follow-on work, not gaps in the decided mechanism.
+
 
 **Increment 1 (2026-08-11): CAndPerm -- DONE, verified in Sail.** funct7 `0b0010111`
 (chosen after a full enumeration of the Custom-2/funct3=001 space), OCA idiom, monotonic
