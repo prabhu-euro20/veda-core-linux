@@ -135,6 +135,69 @@ stays bounded. 24 bits is the starting point, not a proof.
 - `veda_types.sail` field widths; every CGet* query; the pack/unpack used by
   OCL.C/OCS.C and the GDB stub.
 - RTL `/vreg` fields; the ODT entry layout (Base/Length/generation widen too).
-- Tag-memory granule size stays; capability is now 32 bytes -> OCL.C/OCS.C move 256 bits.
-- Re-run: 63/63 Sail self-check, 51/51 ACT4 (should be untouched -- GPR datapath
-  unchanged), 49/49 RTL smoke.
+- Re-run: Sail self-check (65/65 today), 51/51 ACT4 (should be untouched -- GPR datapath
+  unchanged), RTL smoke.
+
+## Resolved implementation decisions (Increment 2, grounded 2026-08-11)
+
+An adversarial read-only grounding pass over the whole Veda Sail model reconciled this
+target against what Sail can actually express and surfaced seven real decisions. All are
+now settled; three notes below **override or sharpen** the earlier text of this doc, per the
+"challenge, don't recite" discipline.
+
+**Confirmed 256-bit layout (MSB->LSB, exactly 256 data bits, NO pad bit):** Object_ID[255:212]
+44 / Base[211:156] 56 / Length[155:116] 40 / Offset[115:76] 40 / Perms[75:60] 16 /
+otype[59:44] 16 / generation[43:20] 24 / flags[19:0] 20. The old `@ 0b0` pad (bit 0) and the
+unpack pad-skip **cease to exist**; pack/unpack are re-derived field-by-field. `UNSEALED_OTYPE`
+(0xFFFF) and `VEDA_OTYPE_SENTRY` (0xFFFE) are unchanged (otype stays 16-bit).
+
+1. **Tag granule -> widen to 32 bytes (OVERRIDES the earlier "granule size stays" line).**
+   A 256-bit capability is 32 bytes = two 16-byte granules. Keeping the 16-byte granule is a
+   **forgery hazard**: the tag store's `__ReadRAM_Meta` reads a single bit at the start
+   granule, so a plain-store tamper of bytes 16..31 of a stored capability would leave the
+   start-granule tag set and be **invisible** -- a permission/generation forgery primitive.
+   Widen the granule to 32 bytes so the one-capability-one-granule invariant (which makes the
+   tag store's width-oblivious semantics correct-by-construction) survives, plain-store
+   invalidation stays complete, and the meta functions stay untouched. This matches CHERI's
+   own capability-sized-granule model. `>>4 -> >>5`, granule count halves.
+2. **OCL.C/OCS.C require 32-byte natural alignment, HARD trap on violation** (new cause
+   `VEDA_CAUSE_CAP_MISALIGNED`). This is the only alignment rule under which the single-granule
+   mapping is well-defined; hard-trap matches the existing OCL/OCS Tag/Seal violation family,
+   and a misaligned capability spill/reload is a compiler/ABI bug, not a recoverable soft
+   condition.
+3. **ODT index domain -- bounded direct-mapped window.** The capability legitimately carries
+   the full 44-bit Object_ID (format future-proof, RTL-compatible), but a flat `vector(2^44)`
+   ODT is ~300 TiB and will not compile. Keep the modeled table at its current flat size
+   (2^23) and make `odt_lookup`/`odt_write` trap `unsigned(id) >= MODELED_SIZE` as
+   OBJECT_NOT_FOUND before indexing. This is the honest interim until the segmented-Object_ID
+   trilemma (DESIGN_06) is designed -- the same "real, bounded, honestly-scoped" discipline as
+   the RTL's 256-entry ODT.
+4. **flags(20) -- opaque/reserved, minted as zeros by Bind.** Assigning a bit layout now
+   (especially the CID sub-field width) ahead of the DESIGN_00 namespace work would be an
+   under-sourced guess. Reserve the 20 bits, mint zeros, let a later design assign positions.
+5. **Rename the capability's `Reserved` field to `generation`** and add the separate `flags`.
+   Sail's type checker turns every stale `.Reserved` into a compile error (not a silent bug),
+   so the rename is safe and removes a genuinely misleading name.
+6. **ODT-Populate operand redesign is a SEPARATE follow-on increment.** Base56+Length40+Perms16
+   = 112 bits no longer fits the single-GPR packed descriptor, and `veda_attr` (bits(32)) can't
+   hold Length40+Perms16. Widen `veda_attr` to bits(64) and stage Base via a GPR/second CSR;
+   retire the packed descriptor. Because Bind can `zero_extend` a still-narrow ODT Base into the
+   wide capability, the ODT-entry widening + Populate redesign can land AFTER the core struct
+   widen as its own tested increment -- keeping the atomic core change smaller.
+7. **Gate `Ext_Veda` on `xlen == 64`** (reverses the earlier xlen-generic decisions; drops
+   NMC_ADD.W on RV32). A 56-bit Base / 44-bit Object_ID design is semantically RV64-scale;
+   `zero_extend(Base:56)` into a 32-bit `xlenbits` is ill-typed, and the xlen-generic gymnastics
+   become impossible once fields exceed 32 bits. Per compliance-over-loss-aversion, gating is
+   the correct, honest trade. This is a **prerequisite that lands before any width edit**.
+
+**R9 (index bits):** stay at `vcapidx = bits(4)`; **no Sail change** -- Sail is already the
+fail-closed golden model (a nonzero index MSB is an `encdec` no-match). R9's decode-guard is an
+RTL-side change; the Sail model already has the property.
+
+**Decomposition:** the struct widen + pack/unpack + tag-granule + OCL.C/OCS.C + Bind
+(zero-extend bridge to a still-narrow ODT) + all arithmetic consumers + otype range-guards +
+the xlen gate form **one atomic commit** (Sail forbids a partially-wide struct); the corpus is
+red throughout and green only at the end. ODT-entry widening + Populate redesign follow as a
+separate green increment. Six Sail proof risks were catalogued (xlen typecheck, OCA slice
+comment, otype-vs-Offset sentinel forgery, Kind-Int tag-store bound, Base+Offset wrap, ODT
+index-vs-array-size) and each has a stated resolution.
