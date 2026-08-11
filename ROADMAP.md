@@ -41,8 +41,27 @@ verified baseline with zero regressions + 2 new), and both new tests were **muta
 (mask-ignored and seal-check-dropped mutants each killed exactly the intended test). Work in
 `Veda-Core-sail-riscv` branch `phase1-respec`; tests + results doc in `veda-core-sindhu`
 (`veda-core/PHASE1_SAIL_RESPEC_CANDPERM_RESULTS.md`). Baseline was established on a freshly
-built simulator *before* the change, so the result is attributable. Next increment: the
-256-bit format itself (+ the R9 index-bit reservation and decode guard).
+built simulator *before* the change, so the result is attributable.
+
+**Increment 2 (2026-08-11): the 256-bit capability format -- DONE, verified in Sail.**
+Object_ID 44 / Base 56 / Length 40 / Offset 40 / Perms 16 / otype 16 / generation 24 / flags
+20 = 256 exactly (no pad bit; pack/unpack re-derived field-by-field). All four spec-level
+walls removed in the format. **69/69 self-check tests pass.** Two decisions overrode earlier
+design text and are recorded in DESIGN_01: the **tag granule widened 16 -> 32 bytes** (a
+16-byte granule would have let a plain store rewrite the half of a stored capability holding
+Perms/otype/generation while its tag survived -- a forgery primitive), and **Ext_Veda is now
+RV64-only** (56-bit Base cannot be zero-extended into a 32-bit register; there is no RV32
+Veda-Core under any Linux-scale format). Also: 32-byte alignment for OCL.C/OCS.C as a hard
+trap, an otype representability guard closing a reintroduced sentinel-forgery path, and a
+bounded ODT index window. ODT entry and PCC deliberately stay narrow (lossless zero-extend /
+truncate bridges) so the atomic change stayed as small as possible. Results:
+`veda-core/PHASE1_SAIL_RESPEC_256BIT_RESULTS.md`.
+
+**Next increment: widen the ODT entry + redesign ODT-Populate's operand model** (Base56 +
+Length40 + Perms16 = 112 bits no longer fits one GPR; `veda_attr` must widen to 64 bits), and
+widen PCC in the same change (that is when the `VEDA_PCC_UNBOUNDED` sentinel value changes).
+Until then the ODT's own widths, not the capability format, remain the real limit on object
+size and count.
 
 
 The current 128-bit format cannot express Linux-scale anything: Length 16b caps objects at
