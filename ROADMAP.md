@@ -32,7 +32,18 @@ builds exactly that, without giving up a pillar.
 
 ## Phase sequence (dependency-ordered, from DESIGN_06)
 
-### Phase 1 -- Capability format respec (DESIGN_01)
+### Phase 1 -- Capability format respec (DESIGN_01) -- IN PROGRESS
+
+**Increment 1 (2026-08-11): CAndPerm -- DONE, verified in Sail.** funct7 `0b0010111`
+(chosen after a full enumeration of the Custom-2/funct3=001 space), OCA idiom, monotonic
+clear-only, sealed/untagged source soft-fails. **67/67 self-check tests pass** (65-test
+verified baseline with zero regressions + 2 new), and both new tests were **mutation-tested**
+(mask-ignored and seal-check-dropped mutants each killed exactly the intended test). Work in
+`Veda-Core-sail-riscv` branch `phase1-respec`; tests + results doc in `veda-core-sindhu`
+(`veda-core/PHASE1_SAIL_RESPEC_CANDPERM_RESULTS.md`). Baseline was established on a freshly
+built simulator *before* the change, so the result is attributable. Next increment: the
+256-bit format itself (+ the R9 index-bit reservation and decode guard).
+
 
 The current 128-bit format cannot express Linux-scale anything: Length 16b caps objects at
 64 KiB, Base 32b caps physical memory at 4 GiB, Object_ID 23b caps live objects at 8.4M,

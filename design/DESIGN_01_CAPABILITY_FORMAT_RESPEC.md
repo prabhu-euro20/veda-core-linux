@@ -105,6 +105,23 @@ one ID does not revoke the alias).
 new Object_ID and **no** aliasing -- the same live object, a weaker capability. Essential
 for the multi-process Linux rights model (read-only text shared to children, etc.).
 
+**Status: BUILT AND VERIFIED IN SAIL (Phase 1, first increment, 2026-08-11).**
+`funct7 = 0b0010111` -- the next free Custom-2/funct3=001 slot, chosen after a full
+enumeration of every existing user of that space (OCA 0001010, CSetBounds 0001000,
+CSetBoundsExact 0001001, CSeal 0010000, CUnseal 0010001, OCInvoke 0010010, OSpecialRW
+0010011, OCJALR 0010100, CSealEntry 0010101, OCRETURN 0010110), the same "grep the whole
+file first" discipline that once caught a real OCJALR/OSpecialRW collision. Implemented in
+`veda_cap_insts.sail` in the OCA idiom exactly: fields written unconditionally, Tag cleared
+on an untagged or already-sealed source; **no bounds term** (masking Perms cannot produce an
+out-of-window value, so tag+seal are the only soft-fail conditions). Monotonicity is
+structural, not a check: bitwise AND can only clear, never grant.
+Verified on the real Sail model: **67/67 self-check tests pass** -- the full 65-test verified
+baseline with **zero regressions**, plus two new tests (`vc_candperm.S`: exact AND semantic
+against a computed expectation, mask=0 clears every permission while the Tag survives,
+Base/Length/Offset untouched; `vc_candperm_neg.S`: a `CSealEntry`-sealed source soft-fails
+with Tag=0). Both were mutation-tested (see the milestone results doc) so they cannot pass
+vacuously.
+
 ## Generation vs churn (why 24 bits, honestly)
 
 Even 24-bit generation is finite. Linux allocates continuously. Two mechanisms combine:
