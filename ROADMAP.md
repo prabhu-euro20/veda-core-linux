@@ -104,7 +104,7 @@ Known RTL realities the re-staging must handle (from the complete veda_core.tlv 
 - Gate: ACT4 51/51 on the pipelined base, then the full Veda smoke corpus, then (new) a
   synthesis re-run of the staged check path to confirm the 95<114 margin holds per-stage.
 
-### Phase 5 -- Throughput memory system (DESIGN_07 -- to be authored next)
+### Phase 5 -- Throughput memory system (DESIGN_08 -- to be authored next)
 
 The spec's own admitted #1 open problem: no designed mechanism hides DRAM payload latency
 (hidden today by DRAM_EXTRA_CYCLES=0 and the deliberately narrow M24 stall scope -- ordinary
@@ -177,14 +177,45 @@ world-first for an address-less ISA.
 
 ---
 
+## Security & robustness hardening (DESIGN_07 -- adversarially derived, done 2026-08-11)
+
+DESIGN_07 red-teamed DESIGN_00-06 across 6 attack surfaces and verified every finding against
+the real files. Adopted radical decisions, attached to the phases above:
+
+- **Phase 1-2** (highest-leverage, close real *present* logical gaps by construction): **R1
+  object-granular allocation** (SLAB-CARVE child Object_IDs -> closes the dominant intra-slab
+  UAF class), **Rev-A selective revocation** (per-object epoch/delegation vector), **Rev-B
+  sweeping revocation** (hardware sweep engine; the concrete form of DESIGN_06's Cornucopia
+  item, must include the CRF in scope), **Rev-E range-gate all capability memory paths +
+  validate ODT-Populate Base**. All co-depend on the 44-bit ID / 256-bit format.
+- **Phase 4**: **R5 provably-non-speculative capability enforcement** -- a new 6th pillar,
+  landed as a DESIGN_04 pipeline contract *before* Phase 4 RTL (the check gates access, not a
+  post-hoc trap; capability micro-ops serialize at issue).
+- **Phase 6 multi-hart reopening checklist**: **R3** per-object MSA transaction (recheck+access
+  indivisible -> closes cross-hart TOCTOU), **R4** Integrity Manager returns as MSA witness,
+  **Rev-C** real aq/rl or SC-by-default, **Rev-D** atomic ODT compare-and-set claim.
+- **Phase 3 / boot**: **R7** hardware root-of-trust + measured boot (replaces the `initial`
+  ODT-seed scaffold), **Rev-F** attestable lifecycle measurement.
+- **Phase 8 IO**: **R8** object-based IOMMU (interconnect carries Object_IDs, MSA is the sole
+  DRAM reference monitor) -- specify before any second bus master / DMA.
+- **Silicon-realization phase (T3 physical-fault hardening, explicitly optional)**: **R6**
+  dual-rail fail-closed check enforcement, **R6b** tag ECC/parity, **R2** per-entry ODT
+  integrity MAC.
+
+Two findings rejected on verification (recorded so they are not re-raised): ODT-region is
+already isolated from base-ISA stores by construction; TCM static placement already covers the
+same-hart cross-compartment case (no flush needed).
+
 ## Immediate next actions (in order)
 
-1. **DESIGN_07_THROUGHPUT_AND_MEMORY_SYSTEM.md** -- the MSA object-prefetch/streaming design
+1. **DESIGN_08_THROUGHPUT_AND_MEMORY_SYSTEM.md** -- the MSA object-prefetch/streaming design
    (Phase 5's spec), quantified against the E*N / k-sweep numbers above.
 2. **Segmented-Object_ID design doc + Sail experiment** -- the trilemma decision (Phase 2
-   gate; DESIGN_01's ID-width choice wants this settled before freezing 44 bits).
+   gate; DESIGN_01's ID-width choice wants this settled before freezing 44 bits, and now also
+   carries R1/Rev-A/Rev-B ODT-entry field additions).
 3. **Phase 1 Sail work begins** in a `Veda-Core-sail-riscv` branch: veda_types.sail respec
-   behind a build-time switch, self-check corpus re-pass.
+   behind a build-time switch (256-bit format + CAndPerm + R1 carve mode + Rev-A epoch
+   vector), self-check corpus re-pass.
 4. RTL `linux-core` clone is created only when Phase 1 Sail is green -- Sail-first, as always.
 
 ## Standing constraints (from the verified line's own docs)
