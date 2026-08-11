@@ -74,10 +74,27 @@ needs a synthesised max-length object; the compact descriptor can't express the 
 recorded in DESIGN_01 as an open question (should OCRETURN restore saved bounds?), flagged not
 fixed. Results: `veda-core/PHASE1_SAIL_RESPEC_ODT_WIDEN_RESULTS.md`.
 
-**Next increment: widen generation (8 -> 24) + redesign how retirement is tested** (the current
-saturation tests loop to the threshold; 16.7M iterations is not a test). After that, the ODT
-index window / segmented-Object_ID (DESIGN_06) is the remaining piece before the 44-bit
-namespace is fully backable, not just expressible.
+**Increment 4 (2026-08-11): widen the generation counter -- DONE, verified in Sail.**
+`odt_entry.generation` 8 -> 24, matching the capability field, so the last narrow-to-wide bridge
+is gone (Bind and the dereference recheck copy/compare directly). The **retirement ceiling moves
+from 255 reuses per slot to ~16.7M** -- the fifth and final width wall. **70/70 self-check.**
+The real problem this increment solved was not the width swap but **how to test a threshold too
+large to loop to**: the old negative test used `.rept 256`, and `.rept 16777216` is not a test.
+Answer: **direct ODT-state injection near the boundary** -- a reset seed (Object_ID 55) at
+`generation = 0xFFFFFE`, one below the real threshold, so two destroys cross the genuine
+saturate-then-retire transition at the **true 24-bit constant** rather than a reduced stand-in.
+This is the project's own established technique (every seeded object is written directly at
+reset; the RTL uses the same injection for owner-hart tests it cannot otherwise drive). The
+positive test was unaffected (5 re-populates, nowhere near any threshold). Results:
+`veda-core/PHASE1_SAIL_RESPEC_GENERATION_RESULTS.md`.
+
+**Phase 1 status: the capability format and the ODT entry are now width-consistent** -- all four
+format walls plus the retirement wall are removed in behaviour. **Next: the ODT index window /
+segmented-Object_ID (DESIGN_06)** -- the 44-bit namespace is expressible and backable per-entry,
+but the modeled table is still a bounded flat window, so ids above it read as not-found. That is
+the trilemma decision (flat vs resident vs huge), and it is the last piece before Phase 1 can be
+called closed. Note also that widening generation raises the reuse ceiling but does not remove
+the need for **sweeping revocation** (DESIGN_06) under truly unbounded churn.
 
 
 The current 128-bit format cannot express Linux-scale anything: Length 16b caps objects at

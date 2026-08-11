@@ -161,6 +161,21 @@ slab object -- but then intra-slab UAF is not caught, an honest temporal-safety
 weakening); (2) **sweeping revocation** (DESIGN_06) reclaims IDs so generation pressure
 stays bounded. 24 bits is the starting point, not a proof.
 
+**Status: BUILT AND VERIFIED IN SAIL (Phase 1, increment 4, 2026-08-11).** `odt_entry
+.generation` widened 8 -> 24, matching the capability field, so the last narrow-to-wide bridge
+is gone (Bind and the dereference recheck now copy/compare directly). The retirement ceiling
+moves from **255 reuses per slot to ~16.7M**. The mechanism is unchanged in kind: the counter
+freezes at maximum and the next bump retires the slot.
+
+**How a 16.7M threshold is tested, since it cannot be looped to.** The 8-bit test reached the
+ceiling with `.rept 256`; `.rept 16777216` is not a test. The threshold is instead exercised by
+**direct ODT-state injection near the boundary** -- a reset seed (Object_ID 55) placed at
+`generation = 0xFFFFFE`, one below the real threshold, so two destroys cross the genuine
+saturate-then-retire transition. This is the project's own established technique (every seeded
+object is written directly at reset; the RTL uses the same injection for owner-hart tests it has
+no second hart to drive), and it deliberately tests the **true 24-bit constant** rather than a
+reduced stand-in threshold, which would leave the shipping boundary arithmetic untested.
+
 ## Blast radius (what this touches -- plan before coding)
 
 - `veda_types.sail` field widths; every CGet* query; the pack/unpack used by
