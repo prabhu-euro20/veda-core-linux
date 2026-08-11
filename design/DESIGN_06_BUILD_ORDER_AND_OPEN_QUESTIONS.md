@@ -58,6 +58,16 @@ choice -- but 432 needed it for on-chip storage, a constraint Veda's DRAM-reside
 does not share), or accepting a bounded global object count (embedded-only, not general
 Linux). Segmented-ID is my recommendation; it needs its own design doc + Sail experiment.
 
+**RESOLVED (2026-08-11) in DESIGN_08.** The decision is domain-segmented Object_ID:
+`{region:20, local:24}` where **region = a protection domain** (not an arbitrary bit-split).
+The count explosion (R1 SLAB-CARVE) lands in the demand-paged 24-bit local dimension and never
+touches the resident, flat 20-bit region count -- the bounded thing (domains) stays resident,
+the unbounded thing (objects) pages. A Current-Region Base Register loaded at domain entry keeps
+intra-domain binds at one read (no regression); only cross-domain binds pay the extra RT read.
+Determinism is preserved in shape and re-scoped to resident regions; the RTOS line becomes a
+lock-resident mode of the same core, not a separate profile. See DESIGN_08 for the full decision,
+rejected alternatives, honest tradeoffs, and the validating Sail experiment.
+
 ## Other honest open questions
 
 - **Determinism scope:** must be re-stated as "deterministic check path + resident/locked
