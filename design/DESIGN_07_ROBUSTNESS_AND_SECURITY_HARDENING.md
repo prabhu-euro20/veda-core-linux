@@ -485,6 +485,98 @@ on the current region) does not generalize for free.
 
 ---
 
+## Tier H -- found by adversarially reviewing our own just-shipped increment
+
+### R11. The domain crossings never revalidate the code object -- execute-after-free
+
+**Status: confirmed by execution, fixed in Sail, RTL mirror pending.**
+
+Enumerate every consumer of an object's `Base` and ask which of them re-reads the ODT:
+
+| Consumer | Rechecks {valid, generation, resident}? |
+|---|---|
+| `veda_check_access` -- OCL.D / OCS.D / OCL.C / OCS.C / Veda-Atomic | yes |
+| `veda_check_nmc_access` -- NMC_ADD.W / .D | yes |
+| OCInvoke / OCReturn / OCJALR | **no** |
+| instruction fetch (PC against PCC) | **no** |
+
+`odt_lookup` has exactly eight call sites in the model: Bind, the two dereference checkers, and
+the five table-mutating instructions. **Not one crossing.**
+
+DESIGN_02 Phase 2 added object residency to Bind and to all six data-dereference families. The
+three crossings are the only Base-consumers it was never added to. So a sealed **code** capability
+survived an eviction that a **data** capability to the very same object did not.
+
+**Reproduced, with a control that isolates the asymmetry.** Page out an object, then: `veda.bind`
+of that Object_ID correctly traps 0x0A (asserted on `mcause` 0x18, `mtval` 0xCA, and a resumable
+`mepc`), while `ocinvoke` through a sealed code capability naming it **took the jump**. Same
+eviction, opposite answers.
+
+**This is not a paging bug -- it predates paging.** The same sequence with `veda.odt.destroy`
+instead of page-out also entered the destroyed object. That falsifies this project's own stated
+reason for CAndPerm existing, quoted from the model source: *"so a later ODT-Destroy still revokes
+every view."* It does not revoke the execute view. Paging did not create the hole; it made the
+state reachable on a routine path and placed it directly under the mechanism DESIGN_02 was
+building.
+
+It also weakens R10's own soundness note -- *"unforgeable, because only a residency-gated Bind ever
+mints a capability with a given Object_ID"* -- which is residency-gated at **mint** and was never
+rechecked at **use**.
+
+**The sharpest detail:** OCInvoke *already* checks **region** residency. That is R10, added two
+increments ago. It asks whether the target domain's table is paged in, and never whether the target
+object is. The region-versus-object distinction DESIGN_02 draws was carried to the crossings for
+regions and never for objects.
+
+#### The fix, in two halves, because neither alone is sufficient
+
+| | closes | does not close |
+|---|---|---|
+| **(a) revalidate at the crossing** | entering an object evicted while you were not running it | eviction of an object while you **are** running it -- fetch never rechecks |
+| **(b) PCC carries an object identity, and eviction refuses on it** | evicting the running code object (live PCC **and** saved MEPCC) | later entry through a sealed capability held in a register |
+
+**(a) is built.** One helper, `veda_code_object_check`, added to all three crossings: one ODT read,
+two verdicts -- generation/valid first (the permanent verdict), residency last (the serviceable
+one), matching both dereference checkers term for term. Placed after the region check, because a
+non-resident region means the object's entry was never legitimately readable, and before any
+commit, so a faulting crossing leaves nothing behind.
+
+**(b) is the next increment.** PCC and MEPCC gain `{Object_ID, generation}`; page-out and Destroy
+refuse when the target backs the live PCC or the saved MEPCC -- one 44-bit compare on a cold path.
+This puts the cost at the rare event rather than at every fetch, which is the same principle
+DESIGN_02's cached-Base decision already settled. It is also the object-level twin of an obligation
+already written down for regions: *"the future RT-write instruction must refuse to clear residency
+on the CURRENT region and on any SAVED region."* Same sentence, object for region.
+
+#### What a crossing actually reports, and why it is not 0x0A
+
+The first version of the regression test asserted RESIDENCY (0x0A) for a crossing after page-out
+and was **wrong** -- the model was right. Page-out **bumps the generation**, so any capability held
+across it fails the generation check before residency is consulted, and reports 0x02.
+
+That is the Option-A contract working as chosen, not a defect. The **capability** is permanently
+dead, because its generation is gone forever; the **object** is still serviceable, and software
+learns that by re-Binding, which reports 0x0A. Held capability gets the permanent verdict, fresh
+Bind gets the serviceable one. Both correct; they answer different questions.
+
+A consequence worth stating: the residency arm of the crossing check is **unreachable through the
+ISA today**, exactly as the dereference-side residency term is, and for the same reason -- page-out
+is the only producer of {valid, non-resident} and it always bumps. It is kept anyway. That
+soundness argument is a property of the current producer set, not of the checker, and DESIGN_02
+still has `cow` and `backing` to add.
+
+#### Residuals, stated rather than closed
+
+- **Multi-hart.** "Refuse on the live PCC" is a single-hart answer; another hart's PCC is invisible.
+  This is the identical residual R10 already recorded for regions and joins the same Phase 6
+  checklist.
+- **The PoCs prove architectural permission, not a completed exploit.** The model's page-out does
+  not scrub or reassign the frame, so what was demonstrated is that entering a freed or moved object
+  is *permitted* -- not that attacker-controlled bytes execute.
+- **OCJALR's cross-domain behaviour is untouched here.** It carries no region check by design
+  ("OCJALR cannot cross a compartment boundary"), and this increment only adds the object check.
+  Whether that design intent is actually enforced was not investigated.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
@@ -520,3 +612,7 @@ extends a verified mechanism; none abandons a pillar.
 
 **R10 (added after RTL-4) attaches to Phase 1's tail**: it must be Sail-respec'd before any
 domain-entry CRBR load lands in either model, and its multi-hart half joins the Phase 6 checklist.
+
+**R11 (added after RTL-6) attaches to Phase 2's tail** and blocks calling DESIGN_02's paging work
+safe: half (a) is built in Sail and owes an RTL mirror, half (b) is the next increment, and its
+multi-hart half joins the Phase 6 checklist beside R10's.
