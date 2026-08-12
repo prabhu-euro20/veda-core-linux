@@ -8,6 +8,15 @@ real files for (a) is-the-weakness-real, (b) is-the-fix-pillar-legal, (c) does-i
 class. 21 findings survived to a verdict: 7 adopted, 10 adopted-with-correction, 2 rejected.
 Every claim below cites the real file that grounds it; nothing is asserted from assumption.
 
+**Reading the labels (`R1`..`R9`, `Rev-A`..`Rev-F`):** these number the *findings* in this
+document -- weaknesses in the design, each with a proposed hardware-native fix. `Rev-*` is the
+revocation family (taking access back). They are **not implementation steps and not an ordered
+work plan**: a finding stays open until some increment happens to close it, and several are
+deliberately long-horizon. Cite them as "DESIGN_07 R2", never a bare "R2" -- the RTL mirror uses
+its own, unrelated `RTL-1` / `RTL-2a` / `RTL-2b` / `RTL-3` increment numbering, and the two schemes
+briefly collided because both began with "R". See `veda-core-sindhu`
+`veda-core/rtl/LABELLING_CONVENTION.md`.
+
 ## Why a threat-model split is the first decision
 
 The single most important correction the verification pass forced: **the current design's
