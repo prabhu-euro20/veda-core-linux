@@ -34,12 +34,53 @@ On Object-Bind (or first dereference) of a non-`resident` object, the MSA raises
 This is paging at *object* granularity instead of 4 KiB pages. `mmap(file)` becomes:
 create an object whose `backing` is the file; pages fault in on touch.
 
+**Settled in implementation (Sail, 2026-08-12): the answer to "Bind *or* first
+dereference" is BOTH, and the "or" above was hiding a hole.** The dereference re-check
+computes its address from the capability's *cached* `Base`, never from the live entry. A
+page-out leaves `valid` true and does not bump `generation` (only Populate and Destroy
+do), so a capability minted while the object was resident and held across an eviction
+would read and write whatever now occupies that memory, with every existing check
+passing. Bind-side checking is still worth having -- it invokes the pager before a
+capability with a meaningless Base is minted -- but **the dereference term is the one
+that closes the hole**, and it is free, because both dereference checkers already read
+the entry.
+
+Note this is the opposite conclusion from DESIGN_08's region residency, which is checked
+at Bind only and correctly so: region residency governs whether a domain's *table* is
+paged in, and by dereference time the capability has cached everything it needs from that
+table. Object residency governs the *backing memory the cached Base points at*. Same
+word, different referent.
+
+Two further rules the implementation had to fix, both about not blurring distinctions:
+**residency is checked LAST** among entry-derived tests (a never-populated slot and a
+destroyed object are now *also* non-resident, and "never existed" / "revoked" must keep
+winning over "paged out"); and the residency fault gets **its own cause (0x0A), not a
+reuse of REGION_FAULT (0x09)**, because the two demand different repair -- page the
+domain's table in, versus fetch this object's contents.
+
 Determinism note (honest): paging is inherently non-deterministic. Scope the
 determinism pillar to (a) the check path (already 95<114 gates) and (b) *locked/resident*
 objects (RTOS-style). Pageable objects are best-effort. State this in the WCET story;
 do not claim determinism for backing-store misses.
 
 ## Mechanism 2 -- object-granular copy-on-write (enables fork)
+
+**CORRECTION, found while implementing mechanism 1 (2026-08-12): as written below, this
+COW is BYPASSABLE and therefore only advisory.** Bind mints the capability's `Perms`
+straight from the ODT entry, verbatim, with no attenuation, on all three bind modes; and
+CAndPerm writes only the capability register, never the table. So a domain that can name
+a `cow` object's Object_ID can simply **re-Bind it and receive a fully writable
+capability**, never touching the attenuated one it was given. The register-local
+attenuation the scheme below relies on is not a security boundary.
+
+The fix must be hardware, matching the project's hardware-first rule: **Bind of a `cow`
+object must itself return a store-attenuated capability**, so the ODT entry is the sole
+authority and no re-derivation can escape it. Software handing out attenuated
+capabilities is then a convenience, not the enforcement.
+
+A second gap to close first: `PERM_STORE_VIOLATION` (0x13) -- the very trap this
+mechanism plans to reuse -- currently has **zero test coverage** in the corpus. Building
+COW on an unexercised path would be building on sand.
 
 `fork` (DESIGN_00: child = new domain) marks the parent's writable data objects `cow`
 in the ODT; parent and child both hold read-only-attenuated capabilities (CAndPerm,
