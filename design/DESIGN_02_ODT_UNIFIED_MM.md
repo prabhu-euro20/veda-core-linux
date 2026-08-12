@@ -205,16 +205,40 @@ Added 2026-08-12, from grounding increment 2. These are real gaps, not polish:
   at `mepc`, or dispatch on the capability index. That is a software workaround for a
   missing architectural channel, and it should be resolved before `backing` is designed
   rather than after.
-- **Page-in via Populate silently resets `owner_hart`** to unowned, so hart ownership does
-  not survive a page-out/page-in cycle. Invisible in a single-hart model; a real hole once
-  multi-hart lands.
-- **The RTL entry has no room for all three fields as currently laid out.** 32-byte entry,
-  25 bytes used, 7 spare, and the byte-aligned-flag convention costs a whole byte per
-  flag. `resident` + `cow` leaves 5 bytes = 40 bits for `backing`, which fits neither a
-  56-bit address nor a 44-bit Object_ID comfortably alongside future needs. Either the
-  flags get bit-packed (breaking the byte-alignment convention that keeps the three
-  hand-written layout copies diffable -- the same convention whose absence caused RTL-3's
-  worst mutation hazard) or `ODT_ENTRY_BYTES` doubles to 64. That decision should be made
-  deliberately, not discovered by the RTL mirror one increment later.
-- **RTL is one increment behind Sail**: `resident` (increment 1) is Sail-only. Any
-  spare-byte arithmetic above is a projection until that mirror lands.
+- ~~**Page-in via Populate silently resets `owner_hart`**~~ -- **resolved.** Page-in is a
+  separate instruction precisely so it can preserve `owner_hart`, and both layers now
+  verify it: a paged-out object owned elsewhere must still refuse Bind with 0x06
+  afterwards, or the object has been stolen by paging it.
+- ~~**The RTL entry has no room for all three fields**~~ -- **decided, and the arithmetic is
+  now confirmed rather than projected.** The real file has 25 bytes used and 7 spare,
+  exactly as estimated. `resident` took **+25 as a whole byte**; the flags were not
+  bit-packed and `ODT_ENTRY_BYTES` was not doubled.
+
+  The deciding argument turned out to be about **page-in**, not about `resident`. Page-in's
+  preserve-set is a *negative specification* -- `generation`, `owner_hart`, `Length`,
+  `Perms` and `retired` survive by **not being written** -- and no compiler checks for a
+  line that should be absent. Byte-aligned, that arm is eight enumerated writes auditable
+  by eye; bit-packed, it becomes a read-modify-write of a shared byte where a preservation
+  bug is invisible. The empirical argument reinforced it: `retired` is the RTL's only
+  bit-level allocation and three separate comment sites described it at offsets it had not
+  occupied since RTL-3.
+
+  **This defers the 64-byte bump rather than avoiding it**, and that is the honest framing.
+  `resident` + a future `cow` leaves 40 bits for `backing`. It is deferred deliberately
+  because what `backing` denotes is still undecided -- sizing the entry before deciding the
+  field the entry exists to hold is the wrong order.
+
+  One mitigation landed with it: `resident` is the first field in the RTL to use a **named
+  offset constant** rather than a literal. The layout is hand-written in **six** places
+  (the RTL's own comment says three and undercounts), and a field placed at +25 in five of
+  them and +26 in the sixth compiles clean and produces a permanently wrong residency.
+- ~~**RTL is one increment behind Sail**~~ -- **resolved.** Both increments are mirrored;
+  the RTL suite is 69/69 with 42 mutants killed across three sweeps and 2 proven
+  equivalent. See `RTL_MIRROR_06_PAGING_RESULTS.md` in the implementation repo.
+- **New, found by the mirror: an unauthorized ODT-Populate is architecturally invisible in
+  RTL.** All five ODT-family instructions raise `Illegal_Instruction` on authority failure
+  in Sail. The RTL's page-out and page-in now do, but Populate, Populate-Fast and Destroy
+  still silently suppress their write and advance the PC -- so a refused mint is
+  indistinguishable from a successful one without a software sentinel convention that is
+  nowhere written down. The mechanism to fix it now exists in the RTL; closing it changes
+  existing test expectations and is queued as its own increment.
