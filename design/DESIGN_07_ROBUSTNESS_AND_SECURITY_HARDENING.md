@@ -403,6 +403,59 @@ decode guard; no cache, no raw address). **Attaches to:** DESIGN_01 (bits) + Pha
 
 ---
 
+## Tier G -- found during implementation, not by the original review
+
+### R10. A CRBR load without a matching restore is a compartment escape
+
+**Found while implementing the DESIGN_08 region table in RTL (increment RTL-4), not by this
+document's original panel.** It is a T1 (single-hart) confused-deputy finding, and it is created by
+*adding* a feature rather than by omitting one -- which is exactly why it is worth recording.
+
+**The mechanism.** DESIGN_08 Section 4 specifies that the Current-Region Base Register is "set
+explicitly at domain entry (OCInvoke)" and stops there. It says nothing about the return path,
+about trap entry, or about what happens if the region a live CRBR names is later paged out. Combine
+that silence with `veda_region_is_resident`'s deliberate shortcut -- **the current region is treated
+as resident without consulting the Region Table at all**, which is precisely what buys the one-read
+fast path -- and the hole is immediate:
+
+> Domain A invokes domain B. OCInvoke loads the CRBR with B. OCReturn's only operand is a sentry
+> capability, and no saved-caller-region state exists anywhere, so the CRBR is never restored. A
+> resumes with **B as its current region**, and the current region is fault-exempt by construction.
+> A now holds unchecked, Region-Table-free access to B's entire object namespace, and keeps it
+> indefinitely.
+
+A second, independent path to the same state: a trap handler that runs with the faulting domain's
+CRBR still loaded can page that domain out, after which "always resident" is simply false and the
+stale base points at reused DRAM -- which the hardware would then read as object descriptors.
+
+**The fix, and it needs no new architectural state.** The caller's domain is already carried,
+unforgeably, in the capability each crossing operates on. OCInvoke enters a sealed code capability
+whose Object_ID's region field *is* the entered domain; OCReturn consumes a sentry capability naming
+the caller's code object, whose region field *is* the caller's domain. So:
+
+> **The CRBR is loaded only from the Object_ID of the code capability being entered or returned to,
+> and every CRBR load is validated through the Region Table -- never through the fast path.**
+
+The second clause is the load-bearing one: it makes "the current region is always resident" true
+**by construction** rather than by software convention, because a CRBR can then only ever name a
+region the RT said was resident. Trap entry and `mret` need the symmetric save/restore, mirroring
+the `mepcc` discipline (conditional capture, self-consuming) that a real nested-trap bug already
+forced on PCC in the RTL.
+
+**Status: designed, not implemented.** The RTL ships the CRBR **reset-only** rather than shipping
+the load without the restore -- the secure move is to not add the feature yet. The residency gate
+and `VEDA_CAUSE_REGION_FAULT` are Sail-verified and are in RTL; the domain-entry load is in neither,
+and no parity is claimed for it. Sequencing: **Sail respec first**, then the RTL mirror, as every
+prior increment. **Pillars:** untouched -- the fix adds no cache and no fill-on-miss; it makes the
+existing single register's load path explicit and RT-validated.
+
+**Multi-hart generalization is open** and belongs on the Phase 6 checklist alongside
+R3/R4/Rev-C/Rev-D: a real multi-hart core must also answer what happens when one hart evicts a
+region that another hart's CRBR names. The single-hart answer (hardware refuses to clear `resident`
+on the current region) does not generalize for free.
+
+---
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
@@ -435,3 +488,6 @@ R5 as a precondition contract. **Phase 6** binds R3, R4, Rev-C, Rev-D as the mul
 reopening checklist. **Phase 3 / boot** carries R7 + Rev-F. **Phase 8** gates R8 ahead of any
 DMA. **Silicon-realization phase** carries R6, R6b, R2 (T3 hardening). Every one of these
 extends a verified mechanism; none abandons a pillar.
+
+**R10 (added after RTL-4) attaches to Phase 1's tail**: it must be Sail-respec'd before any
+domain-entry CRBR load lands in either model, and its multi-hart half joins the Phase 6 checklist.
