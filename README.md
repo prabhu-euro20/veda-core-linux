@@ -9,12 +9,12 @@ Single Address Space, Deterministic. Implementation repos cite these docs, never
 capability-format respec and the object-namespace scale decision are built and checked, not
 proposals-only:
 
-- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **72/72**
-  self-check (256-bit format, widened ODT entry + generation, and the DESIGN_08 region table),
-  every increment mutation-tested. An R10 CRBR-hardening increment is in flight on top.
-- **RTL (hardware)** -- `veda-core-sindhu`, branch `sindhu`: **62/62** smoke tests through
-  increment RTL-4 (the DESIGN_08 region table, the Current-Region Base Register, and the
-  explicit region fault).
+- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **76/76**
+  self-check (256-bit format, widened ODT entry + generation, the DESIGN_08 region table, and the
+  R10 CRBR hardening), every increment mutation-tested.
+- **RTL (hardware)** -- `veda-core-sindhu`, branch `sindhu`: **64/64** smoke tests through
+  increment RTL-5 (the DESIGN_08 region table, the Current-Region Base Register with validated
+  load/save/restore, and the explicit region fault).
 
 Both build on the frozen verified deterministic line (ACT4 51/51 on `veda_core.tlv`), which
 stays untouched -- read-only reference only.
@@ -101,7 +101,9 @@ glossed over:
 - **R10** (found while building the RTL region table): loading the CRBR at a domain crossing
   without a matching restore is itself a compartment escape -- fixed by deriving the region from
   the entered/returned-to code capability's own Object_ID and validating every load through the
-  Region Table. Designed in DESIGN_07 Tier G; the Sail hardening increment is in flight.
+  Region Table. **Closed on both layers**; the residual is the obligation it leaves behind, namely
+  that a future Region-Table-write instruction must refuse to clear residency on the current region
+  or on any saved one.
 
 ---
 

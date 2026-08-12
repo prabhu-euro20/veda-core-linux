@@ -466,8 +466,17 @@ RT-write instruction must refuse to clear residency on the current region and on
 or that soundness lapses. **Pillars:** untouched -- no cache, no fill-on-miss; the single register's
 load path is now explicit and RT-validated.
 
-The RTL still ships the CRBR **reset-only**; the RTL mirror is the next increment (RTL-5), and no
-RTL parity is claimed for the load until it lands.
+**RTL mirror landed too (increment RTL-5, `veda-core-sindhu` commit `c24107e`): R10 is now closed on
+both layers.** 62/62 baseline, 62/62 after the mechanism with no new tests (zero regression
+demonstrated), 64/64 with two new tests -- which are the *entire* coverage of R10 in RTL, since every
+crossing in the pre-existing corpus is region 0. Mutation: 7 of 8 killed, each on its intended test.
+
+The eighth is reported as **surviving**, not dropped: routing the load's validation through the
+fast-path-exempt signal reintroduces the circularity, but that is *unobservable by construction*
+once every load is RT-validated -- a region can only become current after the Region Table has
+vouched for it. It is defence-in-depth, and nothing can distinguish it until an RT-write instruction
+exists that could revoke residency underneath a live CRBR. Which is the same instruction the
+obligation above constrains.
 
 **Multi-hart generalization is open** and belongs on the Phase 6 checklist alongside
 R3/R4/Rev-C/Rev-D: a real multi-hart core must also answer what happens when one hart evicts a
