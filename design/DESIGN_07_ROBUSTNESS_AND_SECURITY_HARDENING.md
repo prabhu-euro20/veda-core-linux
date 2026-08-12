@@ -577,6 +577,83 @@ still has `cow` and `backing` to add.
   ("OCJALR cannot cross a compartment boundary"), and this increment only adds the object check.
   Whether that design intent is actually enforced was not investigated.
 
+### R12. Veda's trap save/restore is not nesting-safe, and the PCC half fails OPEN
+
+**Status: confirmed by execution. Not yet fixed -- the obvious fix introduces a mirror bug, so
+the shape of the real fix is an open design question, recorded here rather than guessed at.**
+
+Found while re-grounding after R11, by noticing that `veda_pcc_save_and_reset` performs **two**
+captures in one function and guards only one of them:
+
+```
+function veda_pcc_save_and_reset() -> unit = {
+  veda_mepcc_base   = veda_pcc_base;        // NO guard
+  veda_mepcc_length = veda_pcc_length;      // NO guard
+  veda_pcc_base   = zeros();
+  veda_pcc_length = VEDA_PCC_UNBOUNDED;
+  veda_crbr_save_and_reset();               // guarded: if current_region != 0
+}
+```
+
+**Reproduced.** Enter a compartment with PCC narrowed to `{compartment, 0x0100}`, take an ordinary
+capability violation, and inside that handler take a second one. Observed directly on the
+architectural CSR: `veda_mepcc_length` reads `0x0100` before the nested trap and `0xFFFFFFFFFF`
+after. The nested capture copies the already-reset live PCC over the outer save.
+
+The restore is guarded on `veda_mepcc_length != VEDA_PCC_UNBOUNDED`, which reads that clobbered
+value as *"nothing was ever saved"* -- so it restores **nothing**, and the compartment resumes with
+**unbounded PCC**.
+
+**The failure DIRECTION is the finding, not the nesting-unsafety itself.** Base RISC-V clobbers
+`mepc`/`mcause`/`mstatus.MPP` on a nested M-mode trap too, and its answer is that handlers must
+manage that themselves. Veda following the same model is defensible. But a clobbered `mepc` fails
+LOUDLY -- the handler returns to the wrong address. A clobbered `mepcc` fails SILENTLY and OPEN: the
+compartment keeps running with its bounds removed. A privilege boundary that dissolves quietly is
+categorically different from a return address that goes wrong noisily.
+
+#### Why the obvious fix is wrong, worked out before writing any code
+
+Copying the CRBR guard onto the PCC half -- skip the capture when PCC is already the reset value --
+does stop the clobber. It also creates the mirror bug: with the outer save now intact, the **inner**
+mret's restore fires, consumes it, and installs the compartment's bounds into the still-running
+handler. The outer mret then finds the sentinel and restores nothing. Same escape, one level up.
+
+Checking `veda_crbr_restore_on_xret` shows the CRBR half **already has that second half of the
+problem**: its save is guarded, but its restore is not nesting-aware and self-consumes on the first
+xret. So the two halves are broken in opposite directions:
+
+| | save | restore |
+|---|---|---|
+| PCC | unguarded -- outer save destroyed | guarded, but nothing left to restore |
+| CRBR | guarded -- outer save survives | unguarded -- inner xret consumes it |
+
+Neither is a missing line. Both are the same underlying gap: **a one-deep save slot with no notion
+of nesting.**
+
+#### Candidate directions, none chosen yet
+
+1. **Fail closed instead of open.** Keep the one-deep slot and RISC-V's "handlers manage nesting"
+   model, but make an unrestorable state deny rather than permit -- restore to a zero-length PCC, or
+   fault, so software must explicitly re-establish bounds. Smallest change; converts a silent escape
+   into a loud failure. Does not make nesting *work*, only make its failure safe.
+2. **A shallow hardware save stack.** Makes nesting genuinely work; costs real state and needs a
+   depth policy plus an overflow behaviour, which is itself a fail-closed decision.
+3. **Software discipline.** `mepcc` and the CRBR pair are already CSR-visible, so a handler can save
+   and restore them. Cheapest, and the most consistent with base RISC-V -- but this project's stated
+   philosophy is that hardware gets priority whenever it can solve a security problem, and it can
+   here.
+
+Direction 1 is the likely answer and 2 is the honest one; the choice deserves its own increment
+rather than a rider on R11.
+
+#### What is NOT yet established
+
+- The CRBR consumption half is reasoned, not executed. It needs its own reproduction before being
+  claimed with the same confidence as the PCC half.
+- Whether a nested trap is reachable **without** M-mode privilege has not been tested. The
+  reproduction takes both traps from the handler's own context.
+- The RTL mirror was not inspected for this. The Sail model is where it was found.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
@@ -612,6 +689,9 @@ extends a verified mechanism; none abandons a pillar.
 
 **R10 (added after RTL-4) attaches to Phase 1's tail**: it must be Sail-respec'd before any
 domain-entry CRBR load lands in either model, and its multi-hart half joins the Phase 6 checklist.
+
+**R12 (added alongside R11) blocks the purecap process model in DESIGN_05**: a compartment boundary
+that dissolves on a nested trap is not a boundary. It attaches to Phase 2's tail beside R11.
 
 **R11 (added after RTL-6) attaches to Phase 2's tail** and blocks calling DESIGN_02's paging work
 safe: half (a) is built in Sail and owes an RTL mirror, half (b) is the next increment, and its
