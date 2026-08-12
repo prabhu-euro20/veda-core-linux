@@ -442,12 +442,32 @@ region the RT said was resident. Trap entry and `mret` need the symmetric save/r
 the `mepcc` discipline (conditional capture, self-consuming) that a real nested-trap bug already
 forced on PCC in the RTL.
 
-**Status: designed, not implemented.** The RTL ships the CRBR **reset-only** rather than shipping
-the load without the restore -- the secure move is to not add the feature yet. The residency gate
-and `VEDA_CAUSE_REGION_FAULT` are Sail-verified and are in RTL; the domain-entry load is in neither,
-and no parity is claimed for it. Sequencing: **Sail respec first**, then the RTL mirror, as every
-prior increment. **Pillars:** untouched -- the fix adds no cache and no fill-on-miss; it makes the
-existing single register's load path explicit and RT-validated.
+**Status: IMPLEMENTED AND VERIFIED IN SAIL (2026-08-12). RTL mirror pending.**
+
+The Sail model now loads the CRBR at both crossings from the entered/returned-to code capability's
+own `Object_ID[43:24]`, validated RT-direct via a new `veda_region_rt_resident` that deliberately
+omits the current-region exemption (using the exempt function would be circular -- a stale current
+region would validate its own successor). A non-resident target raises `VEDA_CAUSE_REGION_FAULT`
+and commits nothing. Trap entry saves the CRBR and resets to region 0; `mret`/`sret` restores it,
+self-consuming, under its own sentinel guard (`VEDA_REGION_NONE = 0xFFFFF`, an out-of-window value
+-- region 0 is a *legitimate* region, so "saved == 0" cannot mean "nothing saved" the way
+`VEDA_PCC_UNBOUNDED` does for mepcc). Read-only CSRs `0x7C6`/`0x7C7` expose the CRBR and its saved
+shadow; read-only is deliberate, since a writable one would be a Milestone-19/20-class self-escape.
+
+**76/76** self-check (72 baseline unchanged -- every existing crossing uses a region-0 code
+capability and region 0 is RT-resident-seeded, so the strictly validated load passes -- plus four
+new tests). **Mutation-tested 6/6 killed**: both region gates, the `rt_valid` fail-closed conjunct,
+the trap reset, the `mret` restore, and the self-consume.
+
+Two obligations this leaves written down rather than assumed: the restore is **infallible** (no RT
+re-validation at `mret`, because the model's `mret` path cannot raise a trap -- verified by reading
+the dispatch), which is sound only while the Region Table is immutable after reset; **the future
+RT-write instruction must refuse to clear residency on the current region and on any saved region**,
+or that soundness lapses. **Pillars:** untouched -- no cache, no fill-on-miss; the single register's
+load path is now explicit and RT-validated.
+
+The RTL still ships the CRBR **reset-only**; the RTL mirror is the next increment (RTL-5), and no
+RTL parity is claimed for the load until it lands.
 
 **Multi-hart generalization is open** and belongs on the Phase 6 checklist alongside
 R3/R4/Rev-C/Rev-D: a real multi-hart core must also answer what happens when one hart evicts a
