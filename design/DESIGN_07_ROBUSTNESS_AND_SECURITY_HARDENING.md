@@ -690,6 +690,42 @@ itself fetch-faults and the trap depth runs away. Any software that narrows its 
 and place the window to still contain the code that continues executing. That is a genuine
 constraint, not a test artifact, and it is recorded in the test.
 
+**RTL MIRROR ATTEMPTED -- and it surfaced a CONTRACT QUESTION that must be decided first.**
+
+The fix was applied to `veda_core.tlv` (depth, poison, capture/consume keyed on depth, four-way
+restore, OCRETURN abandon) and the suite ran **69/70**. The single failure is
+`tb_veda_smoke_m21_restore`, and it fails in exactly two of its three phases:
+
+| phase | result | what it asserts |
+|---|---|---|
+| 1 -- positive restore + enforcement | **PASS** | ordinary restore, preserved by the fix |
+| 2 -- explicit override honored | **FAIL** | software writes mepcc via CSR, then mret restores it |
+| 3 -- nested-trap staleness + repeat | **FAIL** | **the pre-R12 self-consuming behaviour itself** |
+
+**This is not a regression. Phase 3 asserts the defect.** It encodes the old contract, in which the
+restore is keyed on the in-band sentinel and any mret consumes the slot -- which is precisely what
+R12 changes. A test asserting the old behaviour must fail when the behaviour is corrected, and
+"fixing" it to pass without deciding would silently re-enshrine the defect.
+
+**Phase 2 is the real question, and it is a genuine design decision.** With no trap outstanding
+(depth 0), the old design restored PCC from a software-written mepcc; the new one does not, because
+occupancy is now out of band and depth 0 means no frame is owed. Two readings:
+
+- **It was a feature.** Software deliberately stages an mepcc and returns into it. Note this grants
+  no new authority -- software able to write 0x7C2/0x7C3 while unbounded can already write PCC
+  directly via 0x7C0/0x7C1 -- so honouring it is not an escalation.
+- **It was an accident of the sentinel.** The restore fired because `mepcc_length != UNBOUNDED`
+  happened to be true, not because anything was actually saved. That is the same conflation that
+  produced R12, and preserving it preserves the root cause in a second place.
+
+**Not decided here, deliberately.** The RTL change is reverted so the suite stays green at 70/70,
+and the complete patch is preserved at `scratchpad/rtl8_r12_mirror.patch` so no work is lost. What
+must be settled first: **is a software-staged mepcc restore-on-mret a supported architectural
+feature, or an artifact of the in-band sentinel?** If supported, it needs its own out-of-band
+expression (e.g. a software-settable "frame owed" that is distinct from the hardware depth) rather
+than riding on a value comparison. If not, the M21 test's phase 2 and phase 3 must be rewritten to
+the post-R12 contract, and that rewrite is a specification change worth recording as such.
+
 **Still outstanding for R12:** the RTL mirror. The RTL holds the OPPOSITE half of the original
 defect -- guarded capture, self-consuming restore -- so the two layers still disagree about nested
 traps, and that divergence was itself caused by a comment. R12 must not be described as fixed in
