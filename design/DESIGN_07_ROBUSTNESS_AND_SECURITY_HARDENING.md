@@ -742,6 +742,29 @@ contract explicitly in their own words:
   context, and the outer unwind must restore the real bounds. That is the same property the Sail
   test `vc_r12_nested_lossless` already pins, so the two layers end up asserting one contract.
 
+**R12 IS NOW COMPLETE IN BOTH LAYERS (2026-08-13).** Sail 88/88, RTL 71/71. The comment-caused
+divergence is closed and the two layers enforce one contract for nested traps.
+
+RTL sweep: unguarding the capture (the Sail half of the defect), consuming on any mret (the RTL
+half), OCRETURN no longer abandoning the frame, and poison never being set are all KILLED.
+
+**One survivor, and analysing it produced a design property rather than a test gap.** The mutant
+targeting the OUTERMOST poisoned unwind survives because that arm is unreachable by construction:
+once poisoned, every unwind installs a zero-length PCC, which cannot fetch, so the next fetch traps
+and pushes the depth back up. Depth oscillates between 1 and 2 and never reaches 0.
+
+**Stated plainly, because it is a consequence and not an artifact: a poisoned chain never fully
+unwinds, and the compartment is permanently unresumable.** That is fail-closed behaving as intended
+-- the handler still runs, since a trap resets PCC to unbounded -- but **software must detect poison
+via 0x7C8 and tear the compartment down rather than retry the return.** Reasoned from the mechanism,
+not executed, and recorded as reasoning.
+
+**Two stale-artifact near-misses in this increment, same class both times.** A grounding agent read
+the Sail tree mid-mutation and produced a rigorous, well-evidenced, entirely spurious finding. And
+the M21 phase-2 rewrite was reported as failing when it was actually passing -- its `.hex` had been
+built with `gcc`, which fails on that file because a comment contains `/*`, so the binary never held
+the rewrite; assembled with `as` it passes. **A stale artifact does not fail, it lies.**
+
 **M21 REWRITE PROGRESS -- phase 3 done and it validated the fix; phase 2 still open.**
 
 **Phase 3 is the substantive one, and rewriting it confirmed R12 independently.** Its handler
