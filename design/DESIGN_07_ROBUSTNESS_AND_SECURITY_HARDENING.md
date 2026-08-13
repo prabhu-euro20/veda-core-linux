@@ -895,6 +895,225 @@ started until this is settled -- mirroring a behaviour that is not understood wo
   ("OCJALR cannot cross a compartment boundary"), and this increment only adds the object check.
   Whether that design intent is actually enforced was not investigated.
 
+### R11(b). PCC carries an object identity, and eviction refuses on it
+
+**Status: built and verified on the Sail model.** This is the second half of the R11 fix, and it
+closes the window R11(a) structurally could not reach: eviction of the object you are *currently
+executing*. Instruction fetch compares the PC against PCC's cached Base and Length and never
+re-reads the table, so no amount of checking at the crossings can help once you are already inside.
+Before this increment PCC held bounds and no name, so the hardware could not even say which object
+backed the running compartment.
+
+The shape of the fix is the one the table above committed to: give PCC a name, and let page-out and
+Destroy **refuse** on it. One 44-bit compare on a cold path. The cost lands on the rare event -- an
+eviction -- rather than on every fetch, which is the same trade DESIGN_02's cached-Base decision
+already settled.
+
+#### R12 is what made the documented design implementable
+
+Mid-increment I had talked myself out of pinning the saved MEPCC, for a reason that was correct at
+the time: a scheduler that permanently abandons a compartment would pin its code object forever,
+with nothing left to release it -- a denial of revocation. I had planned to revalidate at mret
+instead, treating mret as a fourth crossing.
+
+R12 removed the objection rather than answering it. `veda_trap_frame_abandon` -- added so OCRETURN
+out of a handler drops the trap frame -- clears the saved slot at depth 0. So a switcher that walks
+away from a compartment releases the pin *by the act of walking away*, which is exactly the event
+that should release it. The original design (pin both) is therefore the one that shipped. Recorded
+because the sequencing matters: R12 was not a detour on the way to R11(b), it was a precondition.
+
+#### DECISION -- the identity is `Object_ID` alone, NOT `{Object_ID, generation}`
+
+The table above specified both fields. Only `Object_ID` was built, deliberately.
+
+A generation is what makes a *stored, later-reused* name safe -- it detects that the slot moved on
+while you were holding the name. The pin does not hold a name for later; it holds one for exactly
+as long as the object is running, and the only instructions that could recycle the identifier
+underneath it -- page-out and Destroy -- are precisely the two the pin refuses. **The name cannot go
+stale while it is pinned, by construction.** Carrying a generation next to it would be state that no
+check can ever read differently.
+
+This is a real consequence of choosing refusal over revalidation. Had the mret-revalidation design
+survived, the generation would have been mandatory, because a revalidating check *does* hold a name
+across an interval it does not control. The two halves of R11 differ the same way: R11(a) checks a
+capability handed to it from outside and needs the full `valid`/`generation`/`resident` triple;
+R11(b) checks state it created itself and needs only the name.
+
+#### The handler belongs to no object -- an edit that silently did not apply
+
+The trap-entry clear (`veda_pcc_object = VEDA_OBJECT_NONE` alongside the PCC reset) was written and
+did not land: the anchor assumed `veda_crbr_save_and_reset()` followed the reset directly, and an
+R10 comment block sits between them. The replacement matched nothing and was not asserted, so it
+failed silently.
+
+What that cost is worth recording, because it is not the missing line:
+
+- The handler kept the callee's name. Harmless on its own -- a stale name only ever causes *extra*
+  refusals, never fewer -- so no security property was weakened, and the suite stayed green.
+- **But the test that claims to prove the MEPCC pin was passing through the live-PCC term instead.**
+  With the compartment's name still in PCC, PART B refused for the wrong reason. The assertion was
+  true, the mechanism it named was untested, and the mutant that deletes the saved-name term would
+  have survived with a full green suite.
+
+The lesson is the one this project keeps re-learning in new clothes: a passing negative test proves
+that *something* refused, not that the thing you named refused. Here the two candidate mechanisms
+were one line apart. Every replacement in the increment is now assertion-guarded, and the sweep
+validates all anchors for an exactly-once match before it builds anything -- four earlier sweeps in
+this project tested nothing because a mis-anchored mutation was a silent no-op.
+
+#### An eviction cannot be placed after the capability it invalidates
+
+The first version of the test paged 180 out and back in as a control (*"evictable when nobody is
+running it"*) and then entered it -- and the OCInvoke trapped 0x02. Page-out **bumps generation** by
+the Option A contract, so the sealed capability minted before the round-trip was already dead. The
+control is sound; only its placement was wrong, and it now runs ahead of the binds. Worth keeping
+because it is the same fact from the other side: R11(a) reports a *permanent* verdict for a
+capability held across an eviction, and that verdict does not care that the eviction was benign or
+that the object came straight back.
+
+#### THE REFUSAL WAS BYPASSABLE -- Populate is a third eviction path
+
+Found while mapping the RTL for the mirror, not while writing the Sail fix. `veda_core.tlv:2101`
+computes the post-instruction generation as bumped when `$is_veda_odt_destroy || $veda_odt_valid`,
+and the comment above it names the source: *"Sail's own real rule: repopulating a still-valid slot
+bumps generation too, not just Destroy."*
+
+So **Populate on a live slot does everything Destroy does and more** -- it bumps the generation,
+killing every outstanding capability, *and* repoints Base/Length/Perms. Refusing Destroy and
+page-out on the executing object while leaving Populate open is therefore not a partial fix, it is a
+**bypassable** one: an ODA-authorized actor that cannot destroy the running compartment's code
+object can simply re-populate it. PCC keeps executing the cached old Base, which is now backing
+nothing the object owns and is free to be handed to someone else. Execute-after-free, reached by the
+one door left open.
+
+The fix extends the same predicate to Populate and Populate-Fast. What is worth recording is not the
+missing site but the pattern: this is the **third** time in this one increment that a fix spanning
+several sites was implemented at all but one -- OCReturn on the Sail side of R11(a), OCJALR on the
+RTL side, and now Populate. Each was found by a different accident (a mutation survivor, a second
+mutation survivor, and reading the other layer's source for an unrelated reason). The common cause
+is choosing sites by example -- fixing the ones that come to mind while writing -- instead of
+enumerating the complete set of consumers first and discharging them one by one. For this predicate
+the complete set is answerable exactly: *every instruction that can change an ODT entry's identity
+or backing.* That is Destroy, page-out, Populate, and Populate-Fast; page-in is excluded because it
+already refuses on a live object for an independent reason, which is the very refusal recorded in
+R11(a)'s own test file.
+
+#### VERIFICATION -- 89/89, and 7 of 10 mutants killed
+
+The corpus is 89/89 with one new test, `vc_r11b_executing_pin_neg.S`, covering: refusal of page-out,
+Destroy, Populate-Fast and plain Populate on the running object; the same four refused again from a
+trap handler where PCC belongs to no object and only the SAVED name pins; the release after
+OCRETURN abandons the frame; and an over-refusal control proving an unrelated live object stays
+evictable while a compartment runs.
+
+Ten mutants, **7 killed**. The three survivors are the interesting part, and two of them are not
+what they first look like.
+
+**M8 -- "abandoning the frame does not release the pin" -- is a TRUE equivalent mutant.** PART C was
+written specifically to kill it and cannot, because the depth guard masks it: the abandon sets depth
+to 0 in the same step, and the saved term is gated on `depth != 0`, so the stale name is unreadable.
+Verified against source rather than argued: `veda_mepcc_object` has exactly two readers -- the
+predicate (gated) and the mret restore. The restore is reachable only at depth 1, and every path
+from depth 0 back to depth 1 passes through a trap, whose capture overwrites the stale value first.
+It cannot be observed.
+
+**M4 -- "depth guard dropped" -- is NOT strictly equivalent, and my first claim that it was
+provably redundant was too strong.** The invariant it relies on does hold, and was checked on every
+path: `mepcc_object` has four writers (reset, capture at depth 0, restore, abandon), depth decrements
+only inside restore and abandon, and both clear the name when the decrement reaches 0 -- so
+**depth == 0 implies mepcc_object == NONE**. But software may pass the sentinel itself as an operand.
+Outside a compartment the LIVE term catches it, so both versions refuse; INSIDE a compartment at
+depth 0 the mutant refuses and the original does not. No test supplies that input, and the mutant's
+behaviour is the safer of the two, so it is left alive deliberately rather than chased with a test
+that would enshrine "a nonsense Object_ID succeeds" as expected behaviour.
+
+**M7 -- "trap entry does not clear the identity" -- survives, but is load-bearing anyway,** which is
+the most useful thing this sweep produced. Applied alone, all 89 pass. Applied alone, M3 (dropping
+the saved-name term) FAILS. Applied together, all 89 pass again. The clear has no directly
+observable behaviour of its own; what it does is make a *different* mechanism observable, because
+without it the live term silently answers in the saved term's place and PART B refuses for the wrong
+reason. It is killable -- an outer handler that OCInvokes into an object and then faults leaves that
+object pinned forever without the clear, and correctly reclaimable with it, since that level is
+poisoned and permanently unresumable -- and that test is not yet written.
+
+The general shape, worth carrying: **a passing negative test proves that something refused, not that
+the named thing refused.** Here the two candidate mechanisms were one line apart in the same
+predicate.
+
+#### THE RTL MIRROR IS NOT A TRANSCRIPTION -- the pin changes currency
+
+An adversarial hunt over the RTL and the design records (five lenses, each finding
+independently verified by three sceptics briefed to refute it) returned the same bypass from three
+separate lenses, and it is one no amount of Sail work could have found.
+
+**The pin compares NAMES; this core's ODT writes commit to a SLOT.** Sail resolves an entry as
+`base(region) + the FULL 24-bit local`, so name and slot are in bijection and a name compare *is* a
+slot compare. The RTL models 256 locals per region and resolves with `local[7:0]` only, so many
+names share one slot: Object_ID 436 and Object_ID 180 land on the same 32 bytes. The `id_hi` tag
+exists precisely to catch that, but it is consulted on the two READ paths only -- neither ODT write
+arm looks at it. So `veda.odt.destroy 436` while the core executes object 180 passed the pin
+(436 != 180) and cleared the running object's descriptor in one instruction.
+
+The fix is not to make Sail slot-addressed, and not to leave the RTL name-addressed. **Each layer
+must express the predicate in whatever uniquely identifies a descriptor in that layer** -- the name
+in Sail, the resolved slot here. Same region and same `local[7:0]` means the same entry, and full-name
+equality implies it, so the slot compare strictly subsumes the name compare rather than trading one
+guarantee for another. Sail is unchanged and correct as it stands.
+
+One sceptic refuted the finding on the grounds that 436 is "a genuinely distinct architectural
+object" and refusing it is over-refusal. That objection is right about the architecture and wrong
+about this model: in a table where 436 and 180 cannot coexist, an operation naming 436 that lands on
+180's storage *is* an operation on the running object's storage. Recorded because the disagreement
+is the useful part -- the two layers legitimately differ, and saying so is more honest than forcing
+a false uniformity.
+
+#### The pin traps; the gates it sits beside do not
+
+Found by the same review, verified directly: `$veda_odt_populate_violation` and
+`$veda_odt_destroy_violation` reach only three places -- their definitions, the `$reg_write`
+suppression, and the two `odt_mem` write gates. Neither is in `$veda_trap_taken` or
+`$veda_illegal_instr`. **Populate and Destroy refuse SILENTLY in the RTL**, while Sail raises
+`Illegal_Instruction` for the identical gates. `veda_smoke_m4_neg.S` and `veda_smoke_m11_neg.S` both
+depend on the silence -- they drop privilege, populate, and keep executing.
+
+So the pre-existing divergence is real, is load-bearing for two shipped tests, and is NOT this
+increment's to change. What this increment does is refuse to inherit it: the pin refusal is its own
+signal, `$veda_executing_pin_refusal`, and it joins the trap chain and the illegal-instruction
+umbrella exactly as the page-out and page-in refusals already do.
+
+The security argument decides it. A silent refusal tells a pager that an eviction succeeded when it
+did not, and the pager then reuses memory it does not own -- worse than either trapping or
+succeeding. Software has to LEARN it may not evict the running object, because the correct response
+is specific: abandon the frame first, then retry.
+
+**Recorded as an open item, not fixed here:** the RTL's silent Populate/Destroy refusal diverges
+from Sail for the privilege, authority and retired gates too, and the aliasing write path means
+`destroy 436` still clobbers slot 180 whenever nothing is executing it. Both are RTL-model issues
+that predate R11(b) and both deserve their own increment with their own tests.
+
+#### One wart found in passing, not fixed here
+
+`veda_odt_index` returns `None` for an unresolvable Object_ID, and `odt_write` then does nothing --
+so Destroy on a nonsense identifier returns RETIRE_SUCCESS having changed no state. A pager could
+read that as "the object was destroyed". Pre-existing, outside this increment's scope, recorded so
+it is not re-discovered.
+
+#### Residuals, stated rather than closed
+
+- **Cross-hart revocation is refused, not solved.** On this hart, revocation is never actually
+  blocked: a trap clears the live name, so a handler can always abandon the frame and then evict.
+  What the pin forces is a *deliberate* act -- "I am not returning to this compartment" -- stated
+  before the object dies. On another hart the refusal is real: an object being executed elsewhere
+  cannot be evicted until that hart is stopped. That is the bargain a conventional machine already
+  strikes when it cannot unmap a page another core is running from without interrupting it, and it
+  is preferred here over the alternative, which is letting the other hart keep executing freed
+  memory. Joins R10's and R11(a)'s multi-hart residual on the same Phase 6 checklist.
+- **A poisoned chain pins forever.** Once R12 poison is set the compartment is permanently
+  unresumable, and its name is never restored or cleared, so its code object stays pinned. Consistent
+  with the already-recorded consequence that software must detect poison via 0x7C8 and tear the
+  compartment down; the teardown path must be able to release the pin, and that path is not yet
+  specified.
+
 ### R12. Veda's trap save/restore is not nesting-safe, and the PCC half fails OPEN
 
 **Status: confirmed by execution. Not yet fixed -- the obvious fix introduces a mirror bug, so
