@@ -630,6 +630,66 @@ xret. So the two halves are broken in opposite directions:
 Neither is a missing line. Both are the same underlying gap: **a one-deep save slot with no notion
 of nesting.**
 
+#### GROUNDED IN THE OFFICIAL SPECIFICATIONS -- and both settle it
+
+Read from the documents on disk, quoted and independently re-verified rather than recalled.
+
+**RISC-V.** *The RISC-V Instruction Set Manual, Version 20260715: Intermediate Release*, combined
+volumes; Privileged Architecture v1.13, ratified.
+
+- **A one-deep save slot is NORMATIVE, not a defect.** mepc/mcause/mtval have no stack at all and
+  are written unconditionally on every trap (SS 3.1.14-3.1.16). Only mstatus.xPIE/xPP have a
+  two-level stack. So R12's defect is **not** that Veda-Core has one slot -- RISC-V has one too and
+  calls it sufficient.
+- The architecture assigns the hazard to software explicitly (SS 3.1.6.1): *"Trap handlers must be
+  designed to neither enable interrupts nor cause exceptions during the phase of handling where the
+  trap handler preserves the critical state information required to handle and resume from the
+  trap."*
+- **There IS a ratified mechanism for exactly this: the `Smdbltrp` Double Trap Extension v1.0**
+  (SS 3.1.6.2). An `MDT` bit in `mstatus` is set on trap entry; *"if MDT is already set to 1, then
+  this is an unexpected trap"*, and the hart *"enters a critical-error state **without updating any
+  architectural state, including the pc**"*. MRET clears MDT. Exception code 16 is allocated to it
+  and `medeleg[16]` is read-only zero.
+- Caveat established by searching Volume III in full: `Smdbltrp` appears in **no profile**
+  (RVA20/22/23, RVB23). Ratified, but optional.
+
+**CHERI.** *CHERI Instruction-Set Architecture*. `MEPCC` is a Special Capability Register -- a full
+capability, therefore **tagged**. And decisively: *"NULL Does Not Have the Tag Bit Set"* (SS 9.14)
+while *"The length of NULL is MAXINT"* (SS 9.15).
+
+So CHERI's null capability carries the same max length our sentinel uses, and is distinguished by an
+**out-of-band tag**. CHERI deliberately does not let length be the discriminator. **Veda-Core's bug
+is precisely the thing CHERI's design avoids**, and that was derived here before the spec was read,
+which is why it is stated as confirmation rather than discovery.
+
+#### A FALSE COMMENT CAUSED A REAL DIVERGENCE BETWEEN THE TWO LAYERS
+
+Found while grounding the fix, and it changes the shape of the problem.
+
+`veda_regs.sail` states, as justification for the restore guard: *"veda_pcc_save_and_reset()'s own
+capture is itself conditional, for the identical reason."* **The function has no guard.** The
+capture is unconditional, and always has been.
+
+`veda_core.tlv` then **guards its capture** -- `>>1$veda_trap_taken && (>>1$veda_pcc_length !=
+40'hFFFFFFFFFF)` -- citing that comment: *"mirroring the Sail side's own already-adversarially-
+reviewed conditional-capture design."*
+
+So the RTL implemented what the comment **said** and the Sail model does what its code **does**, and
+the two layers now hold **opposite halves of the same defect**:
+
+| layer | capture | consequence of a nested trap |
+|---|---|---|
+| Sail | unguarded | outer save destroyed; restore reads the sentinel as "nothing saved"; compartment resumes **UNBOUNDED** -- fails open |
+| RTL | guarded | outer save survives, but the self-consuming restore fires on the **INNER** mret; the handler is narrowed to compartment bounds mid-flight |
+
+The RTL's direction is reasoned from the source, not yet executed, and is recorded as such. It
+appears to fail closed-ish (the narrowed handler faults on its next fetch) rather than open -- which
+would make the RTL accidentally safer than the model it mirrors.
+
+**The lesson is the finding.** A comment that misdescribed its own function was treated as
+specification by the next layer down. Every cross-layer mirror in this project is written by reading
+the other layer's comments; this is the first proven case of one being load-bearing and wrong.
+
 #### Candidate directions, none chosen yet
 
 1. **Fail closed instead of open.** Keep the one-deep slot and RISC-V's "handlers manage nesting"
