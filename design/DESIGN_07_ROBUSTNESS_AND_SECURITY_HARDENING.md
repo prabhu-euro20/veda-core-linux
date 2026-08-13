@@ -742,6 +742,34 @@ contract explicitly in their own words:
   context, and the outer unwind must restore the real bounds. That is the same property the Sail
   test `vc_r12_nested_lossless` already pins, so the two layers end up asserting one contract.
 
+**M21 REWRITE PROGRESS -- phase 3 done and it validated the fix; phase 2 still open.**
+
+**Phase 3 is the substantive one, and rewriting it confirmed R12 independently.** Its handler
+contained an explicit software workaround whose own comment states the defect exactly:
+
+> *"mepcc is a single, global pair -- it cannot by itself distinguish 'the OUTER's own eventual real
+> mret, which SHOULD auto-restore' from 'the INNER's own mret, which should NOT' (both see the
+> identical mepcc_length != UNBOUNDED condition). h_phase3_inner therefore explicitly hides mepcc
+> (saves it into s0/s1, clears it) before its own mret."*
+
+So the author had **found R12, judged it a hardware limitation, and cooperated around it in
+software** -- calling that cooperation "not a workaround". That is independent confirmation of the
+defect from before it was named, and it is exactly the kind of software discipline a hardware-native
+design exists to remove. The hide/clear/restore dance is deleted: occupancy is now out of band, so
+an inner unwind and the outermost unwind are distinguishable by construction. **If that dance is
+ever needed again, the depth mechanism has regressed** -- which makes its absence a live assertion,
+not a simplification.
+
+**Phase 2 still fails and is NOT diagnosed.** Its handler now writes both `0x7C2` and `0x7C3` --
+expressing "resume unbounded" honestly as a frame to restore, rather than by clearing a sentinel to
+suppress the restore. Phase 1 passes, so ordinary capture/restore is intact. Leading suspicion,
+unverified: depth accounting across phase 1's own deliberate post-check boundary violation, which
+takes an extra trap. **Recorded as a suspicion, not a conclusion.**
+
+Both patches are preserved and apply cleanly:
+`scratchpad/rtl8_r12_mirror.patch` (the RTL fix) and `scratchpad/m21_rewrite.patch` (the test
+rewrite). The RTL tree is reverted to green at 70/70 rather than left red.
+
 **State at handover:** the RTL patch is complete and preserved at
 `scratchpad/rtl8_r12_mirror.patch` (103 lines, applies cleanly). The RTL tree is reverted to green
 at 70/70 so nothing is left red or half-applied. The remaining work is the test rewrite above, then
