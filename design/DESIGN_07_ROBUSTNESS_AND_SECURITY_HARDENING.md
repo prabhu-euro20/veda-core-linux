@@ -657,6 +657,37 @@ Consequences, stated plainly:
 The test is retained out of the globbed corpus as `poc_r12_nested_lossless_UNRESOLVED.S` so the
 suite reads an honest 86/86 rather than carrying a red test, and so the evidence is not lost.
 
+**DIAGNOSIS PROGRESS (measured via the new read-only CSR 0x7C8, not inferred).**
+
+State sampled at every stage of the reproduction:
+
+| point | depth | poison | veda_mepcc_length |
+|---|---|---|---|
+| trap 1, entering the outer handler | 1 | 0 | -- |
+| trap 2, entering the nested handler | 2 | 0 | -- |
+| **immediately before the outer mret** | **1** | **0** | **0x0100 -- CORRECT** |
+| in the compartment, after both unwinds | 0 | 0 | -- |
+
+**This eliminates every hypothesis held so far.** The saved value is NOT clobbered. Poison is NEVER
+set. The depth counter is exactly right at all four points. So the novel part of the fix -- the
+depth and poison mechanism -- is verified correct **by measurement**, not by argument.
+
+And it produces a contradiction that localises the remaining defect precisely. At the outer mret
+`depth` goes 1 -> 0 and `poison` is false, so the restore must take its else branch and execute
+`veda_pcc_length = veda_mepcc_length`, which is measured to be 0x0100. Yet the compartment then
+reads `veda_pcc_length` as **0**.
+
+Both facts are measured. Therefore the fault lies in **the restore's write of PCC, or in something
+between that write and the compartment's read** -- not in the save, not in poison, not in the
+counter. Remaining suspects, in order: a second consumer of the xret path that overwrites PCC after
+the restore; the interaction with `veda_crbr_restore_on_xret` called at the tail of the same
+function; or the compartment's own CSR read being answered from somewhere other than the live
+register.
+
+Note that 0 is not a value any branch other than the deny path writes, and the deny path is now
+excluded by measurement -- so a fourth possibility is that PCC is being written by a path outside
+these two functions entirely.
+
 **Next step is diagnosis, not implementation:** instrument or expose depth/poison (0x7C8 is free in
 both layers) and determine which branch produces the zero-length PCC. The RTL mirror must not be
 started until this is settled -- mirroring a behaviour that is not understood would propagate it.
