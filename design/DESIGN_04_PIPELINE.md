@@ -97,6 +97,91 @@ Its real cost, stated rather than hidden: on multi-hart, revocation becomes a **
 broadcast** -- the coherence-like mechanism DESIGN_03 avoids. But it would sit on the rare path
 instead of the common one, which is the same trade that settled DESIGN_02's cached-Base decision.
 
+### MEASURED: the per-access check reads 256 bits to use 26
+
+Prompted by the question "why is the ODT in DRAM at all, and is that efficient" -- which turned out
+to be an incomplete question with a measurable answer underneath it.
+
+Enumerating every field `veda_check_access` consumes from the ODT entry, read out of the function
+rather than recalled:
+
+| field | width |
+|---|---|
+| `valid` | 1 |
+| `generation` | 24 |
+| `resident` | 1 |
+| **total** | **26 bits** |
+
+`entry.Base` appears in that function **only inside a comment stating it is deliberately not used** --
+the address is formed from `cap.Base`. `Length`, `Perms` and `owner_hart` are never read on the hot
+path at all.
+
+So the machine fetches a **32-byte (256-bit) descriptor to obtain 26 bits**: roughly **10x read
+amplification on the hottest path in the design**. In the RTL it is about 4x, because the RTL
+additionally needs the 36-bit `id_hi` anti-alias tag -- itself a consequence of truncating `local` to
+8 bits for slot indexing, not a semantic requirement.
+
+### The real finding: one structure is doing two jobs with opposite profiles
+
+| | naming / descriptor | validation |
+|---|---|---|
+| holds | Base, Length, Perms, owner_hart, id_hi | valid, generation, resident |
+| size | ~230 bits | **26 bits** |
+| touched by | Bind, Populate, Destroy, page-out, page-in -- **rare** | **every load and store** |
+| must cover | the object namespace | only what is currently resident |
+
+They are one structure by **history, not by design**: the ODT began as a protection table, DESIGN_02
+promoted it into the machine's whole memory map, and the access path was never revisited. DRAM is
+the right home for the descriptor. It is the wrong home for a 26-bit check on every memory access.
+
+### The cache-less pillar has been read too strictly
+
+"Cache-less" exists to buy **determinism**. What destroys determinism is **dynamic replacement**, not
+SRAM. A flat, directly-indexed, statically-placed SRAM array is O(1) and fully predictable -- a
+**scratchpad, not a cache**. M24's TCM tier already relies on exactly this reasoning; it simply
+applies it to whole 32-byte entries rather than to the 26 bits that are actually hot.
+
+### Proposal -- an object validity vector (not yet decided)
+
+Split the hot fields into their own flat array: `{valid, generation, resident}` per slot, padded to
+4 bytes, in SRAM, indexed by the slot number the design already computes. The descriptor table stays
+in DRAM and is read only at Bind / Populate / Destroy / page-out / page-in.
+
+**No semantic change**: same fields, same checks, same causes, same determinism. Only the storage
+and the access path move.
+
+Coverage in the same 1 KB of on-chip memory M24 already spends:
+
+| | objects covered |
+|---|---|
+| today, whole 32-byte entries | 32 |
+| validity vector only | **256** |
+| at 32 KB | **8192** |
+
+**8x more hot coverage per byte, at identical semantics.** The second-order gain matters more for
+multi-hart: a 26-bit structure is far easier to bank or multi-port than a 256-bit one, which is
+precisely the N-harts-reading-one-structure bandwidth problem above.
+
+**Where this must not be oversold:** it does **not** remove tiering. The slot space is still bounded
+by (resident regions x entries per region) and a real machine sizes that far above 768. What it buys
+is a hot tier 8-10x more effective per byte -- not the disappearance of the tier.
+
+### Two candidate directions, compared
+
+| | validity vector | eager revocation (CAM the CRF at page-out/Destroy) |
+|---|---|---|
+| per-access cost | small deterministic SRAM read | **no ODT read at all** |
+| revocation cost | unchanged | CAM over 16 CRF entries, plus a cross-hart broadcast |
+| semantic change | **none** | real -- moves *when* the check happens |
+| multi-hart | easy to bank (26 bits vs 256) | needs cross-hart invalidation, the very mechanism DESIGN_03 avoids |
+| risk | low, a reorganisation | higher: new invalidation path, and memory-resident capabilities need separate treatment via OCL.C |
+
+**Recommended order: the validity vector first**, precisely because it changes no semantics -- it
+relocates state rather than altering when a check occurs. Eager revocation is a genuine
+architectural change and reintroduces a coherence-shaped mechanism on multi-hart. They are **not
+mutually exclusive**: eager revocation can be layered afterwards, and by then its benefit would be
+measurable against a known baseline rather than argued.
+
 ### What must be measured before any of this is decided
 
 1. ODT read bandwidth per hart per cycle under a realistic instruction mix.
