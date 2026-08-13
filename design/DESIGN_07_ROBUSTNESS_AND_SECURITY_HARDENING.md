@@ -657,6 +657,44 @@ Consequences, stated plainly:
 The test is retained out of the globbed corpus as `poc_r12_nested_lossless_UNRESOLVED.S` so the
 suite reads an honest 86/86 rather than carrying a red test, and so the evidence is not lost.
 
+**R12 IS NOW COMPLETE IN SAIL AND VERIFIED IN BOTH HALVES (2026-08-13).** Sail 88/88.
+
+| mutant | verdict |
+|---|---|
+| capture unconditionally -- recreates R12 exactly | KILLED |
+| OCRETURN stops abandoning the trap frame | KILLED |
+| poison never set on an unreconstructible level | KILLED |
+| poisoned unwind reconstructs instead of denying | KILLED |
+| saturation does not poison | SURVIVED -- equivalent by construction |
+
+The last is reported as equivalent rather than chased: reaching saturation needs 255 nested traps,
+which is not reachable through the ISA. The saturating branch stays, because that argument is a
+property of what software can currently do, not of the checker.
+
+**The fail-closed half was initially unverified, and that is the finding worth keeping.** The first
+sweep killed the mutant that recreates the defect itself but left poison and saturation untouched --
+the mechanism was proven to WORK while nothing tested what it REFUSES. That is the same shape found
+at every layer of this work: Sail paging left four survivors, all refusals or preservations; RTL-6b
+left four of seven dereference families untested; R11 missed OCReturn on one layer and OCJALR on the
+other. **A refusal that no test can distinguish from its own absence is not verified, however
+correct it happens to be.**
+
+The mutant that mattered most on the second pass was the one making a poisoned unwind reconstruct
+instead of deny -- that hands unbounded authority to a level that had been narrowed, which is R12
+itself reproduced one level up. Killing it shows the test catches the defect in its new shape, not
+only its original one.
+
+**A real property of self-narrowing, found while building the test.** Narrowing PCC to a 0x0080
+window from inside a handler puts the very next instruction outside that window, so the narrowing
+itself fetch-faults and the trap depth runs away. Any software that narrows its own PCC must size
+and place the window to still contain the code that continues executing. That is a genuine
+constraint, not a test artifact, and it is recorded in the test.
+
+**Still outstanding for R12:** the RTL mirror. The RTL holds the OPPOSITE half of the original
+defect -- guarded capture, self-consuming restore -- so the two layers still disagree about nested
+traps, and that divergence was itself caused by a comment. R12 must not be described as fixed in
+hardware until that lands.
+
 **RESOLVED -- the defect was in the TEST, and the retraction is recorded in full because the
 reasoning that produced it was wrong twice over.**
 
