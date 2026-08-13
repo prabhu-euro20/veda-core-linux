@@ -146,8 +146,34 @@ authority and no re-derivation can escape it. Software handing out attenuated
 capabilities is then a convenience, not the enforcement.
 
 A second gap to close first: `PERM_STORE_VIOLATION` (0x13) -- the very trap this
-mechanism plans to reuse -- currently has **zero test coverage** in the corpus. Building
-COW on an unexercised path would be building on sand.
+mechanism plans to reuse -- had **zero test coverage** in the corpus. Building COW on an
+unexercised path would be building on sand.
+
+**Both halves are now closed, and closing the hardware half found a real bug.** The Sail half was
+closed by `vc_candperm_enforce_neg.S`. The RTL half was still open and was confirmed by experiment
+rather than by inspection: deleting the store-permission term from **all three** of the RTL's store
+paths -- OCS.D, OCS.C and the Veda-Atomic path -- left the entire 73-test suite passing. Note the
+count. Sail routes these through one shared `veda_check_access`, so one test covers the shared code;
+the RTL inlines the condition three times, so it needs three phases. Same property, different number
+of sites.
+
+**The bug: CAndPerm was functionally broken in the RTL.** Writing the enforcement test showed that
+an attenuated capability could not be used at all -- every dereference through one trapped 0x02.
+`CAndPerm` carried Base, Length, Offset, Perms, otype, tag -- and neither the **Object_ID** nor the
+**generation**. Both fell through to `$RETAIN`, so the result named object 0 with a stale generation.
+The mux comment eighty lines above already stated the intended rule ("every derivation instruction
+(OCA, CSeal, CSetBounds, CAndPerm, CSealEntry) carries the source Object_ID through unchanged"), so
+the file contradicted its own written intent, and a missing arm compiles clean because `$RETAIN` is
+a legal default and there is no type checker to object.
+
+It stayed invisible for a precise reason worth generalising: **the two existing CAndPerm tests
+inspect the result with CGetPerm/CGetTag and never access through it.** Attenuation was exercised as
+bookkeeping and never as enforcement -- which is exactly what the Sail-side test's own header had
+said about the model corpus, one layer down.
+
+This matters directly to the mechanism below. The COW correction already notes that CAndPerm-based
+sharing is only advisory because Bind re-mints full permissions. What the RTL added on top is that
+the advisory path did not work either.
 
 `fork` (DESIGN_00: child = new domain) marks the parent's writable data objects `cow`
 in the ODT; parent and child both hold read-only-attenuated capabilities (CAndPerm,
@@ -235,10 +261,8 @@ Added 2026-08-12, from grounding increment 2. These are real gaps, not polish:
 - ~~**RTL is one increment behind Sail**~~ -- **resolved.** Both increments are mirrored;
   the RTL suite is 69/69 with 42 mutants killed across three sweeps and 2 proven
   equivalent. See `RTL_MIRROR_06_PAGING_RESULTS.md` in the implementation repo.
-- **New, found by the mirror: an unauthorized ODT-Populate is architecturally invisible in
-  RTL.** All five ODT-family instructions raise `Illegal_Instruction` on authority failure
-  in Sail. The RTL's page-out and page-in now do, but Populate, Populate-Fast and Destroy
-  still silently suppress their write and advance the PC -- so a refused mint is
-  indistinguishable from a successful one without a software sentinel convention that is
-  nowhere written down. The mechanism to fix it now exists in the RTL; closing it changes
-  existing test expectations and is queued as its own increment.
+- ~~**an unauthorized ODT-Populate is architecturally invisible in RTL**~~ -- **resolved
+  (DESIGN_07 R14).** Populate, Populate-Fast and Destroy now trap on every gate, as the model
+  always did. The three tests that had grown around the silence assert the trap as well as the
+  suppression, which makes them stronger: a negative test that only checks "nothing happened"
+  cannot tell a refusal from an instruction that was never decoded.
