@@ -1114,6 +1114,58 @@ it is not re-discovered.
   compartment down; the teardown path must be able to release the pin, and that path is not yet
   specified.
 
+### R14. Populate and Destroy refused SILENTLY -- the RTL never told anyone
+
+**Status: fixed and verified in RTL (73/73 smoke, 51/51 ACT4, 3/3 mutants killed). Sail was already
+correct and is unchanged.**
+
+`$veda_odt_populate_violation` and `$veda_odt_destroy_violation` reached exactly three places: their
+definitions, the register-write suppression, and the two ODT write gates. Neither was in
+`$veda_trap_taken` or `$veda_illegal_instr`. So both instructions **suppressed the write and raised
+nothing** -- an unprivileged program could execute a privileged instruction and be told absolutely
+nothing had happened.
+
+Four independent reasons this is wrong, and none of them is "the model says so" alone:
+
+1. Sail raises `Illegal_Instruction` for all three gates -- privilege/authority, the executing-object
+   pin, and retired.
+2. **The same file already disagreed with itself.** `veda.odt.page.out` and `veda.odt.page.in` trap
+   on the identical authority gate. Two instruction families, one authority check, two answers.
+3. RISC-V's own convention for an instruction the current privilege may not execute is precisely
+   this trap.
+4. Silence is the actively dangerous answer for a refusal. A component that asked to create or
+   destroy an object and got no signal proceeds as though it succeeded.
+
+The silence was never argued for anywhere -- no design note defends it. It was simply what the file
+did, and three tests had grown around it.
+
+#### What this cost, and why the tests got stronger rather than weaker
+
+`veda_smoke_m4_neg.S` and `veda_smoke_m11_neg.S` installed **no trap handler at all** and had been
+deliberately moved onto `veda.bind.notrap` to stay out of the trap path entirely;
+`veda_smoke_m16_neg.S` installed `mtvec` only *after* its refused re-populate. All three would have
+jumped to address 0 -- the exact Milestone-9 failure mode already on record.
+
+Their subject was never the silence. Each says "the write must be suppressed", and each still checks
+exactly that. What was added is the other half: that the refusal was **observable**, with the right
+cause. A negative test that only checks "nothing happened" cannot distinguish a refusal from an
+instruction that was never decoded.
+
+`$veda_executing_pin_refusal`, added by R11(b) precisely because the gates beside it were silent, is
+now fully subsumed and was deleted rather than left as a second route computing the same condition.
+
+#### Verification, and one honest coverage note
+
+Mutation: removing the populate arm from the trap chain is caught by both privilege-gate tests and
+by the R11(b) pin test; removing the destroy arm is caught by the R11(b) pin test **only**; making
+both trap with the wrong cause is caught by the mcause assertions.
+
+That "only" is worth stating plainly: **nothing in the corpus performs an unprivileged Destroy.**
+Destroy's authority gate is covered transitively, through the executing-object pin, and not
+directly. It is symmetric with Populate's gate, which is directly covered, so the risk is low -- but
+it is coverage by adjacency, not by test, and should be closed when Destroy's own negative test is
+next touched.
+
 ### R13. Destroy clears a slot it does not own -- Milestone 15's fix covered reads only
 
 **Status: found while mirroring R11(b), fixed and verified in RTL (73/73 smoke, 51/51 ACT4, 2/2
