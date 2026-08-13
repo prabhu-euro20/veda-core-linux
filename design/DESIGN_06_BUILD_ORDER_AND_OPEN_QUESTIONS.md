@@ -68,6 +68,71 @@ Determinism is preserved in shape and re-scoped to resident regions; the RTOS li
 lock-resident mode of the same core, not a separate profile. See DESIGN_08 for the full decision,
 rejected alternatives, honest tradeoffs, and the validating Sail experiment.
 
+## OPEN DECISION -- "Linux ABI port" means two different projects, and the corpus says both
+
+Raised 2026-08-13 by the direct question *"kernel means the literal Linux kernel or our own
+designed kernel?"* -- and the honest answer is that **this corpus does not say**, in four places,
+with four different phrasings:
+
+| where | wording |
+|---|---|
+| DESIGN_00, closing line | *"with a **Linux ABI on top**"* -- on top of the SASOS domain model |
+| DESIGN_06 step 8 | *"**Linux ABI port** -- UP nommu first, then MMU-less SMP, **then full semantics**"* |
+| DESIGN_06 calibration | *"a UP nommu purecap boot -- which would itself be a world-first (**Linux-class kernel** on an address-less ISA)"* |
+| ROADMAP Phase 9 | *"**Linux ABI port**. UP nommu first, then SMP."* |
+
+"ABI on top" and "Linux-class kernel" read as **our own kernel exposing a Linux-compatible syscall
+surface**. "nommu" is Linux's own build vocabulary (`CONFIG_MMU=n`) and "full semantics" reads as
+**the literal Linux kernel**. These are not shades of the same plan.
+
+### The two readings, and why the difference is not a detail
+
+| | (A) literal Linux kernel, ported | (B) our own kernel + Linux ABI |
+|---|---|---|
+| what gets ported | an `arch/` port, plus making Linux's own internals purecap-correct | our kernel; implement a syscall subset |
+| starting point | 30M+ lines written for integer pointers and a flat address space | **already exists**: MOS-A/B/C switcher, sentries, TSC, scheduler, all verified |
+| effort | multi-year, team-scale. CHERI has a Linux effort and it is **not** purecap-complete, on a **less** radical (address-based) ISA | inside the calibration this document already states |
+| what runs | Linux drivers, filesystems, the network stack -- the ecosystem | exactly what we implement, and nothing else |
+| security posture | Linux internals must be made capability-correct before any guarantee holds | capability-native **by construction** |
+
+### The tension DESIGN_05 already recorded, which bears directly on this
+
+DESIGN_05's own honest-scope closes with:
+
+> *"The confused-deputy-for-free property assumes user pointers are passed **as capabilities**; a
+> legacy syscall ABI passing integer pointers would lose it."*
+
+Linux applications do not pass capabilities. They pass integers. So **implementing the Linux ABI
+faithfully costs one of this architecture's headline security properties at the boundary** -- not
+through any defect, but by definition. Reading (A) inherits that tension across the whole kernel;
+reading (B) confines it to a translation layer we control and can make explicit.
+
+That is the strongest architectural argument available on this question, and it points at (B).
+
+### My read, recorded as a leaning and NOT as a decision
+
+DESIGN_05 Part C defines a process, a kernel, scheduling and syscalls entirely in Veda-native terms
+(domain, sentry, TSC, capability table, ODA-possession) and never once refers to porting Linux
+internals. Phase 8 **is** our kernel, and its seed is already built and verified. On that evidence
+(B) is the coherent reading, and (A) appears to have entered through vocabulary rather than through
+a decision.
+
+But I am not deciding it here, for a reason worth stating: the choice determines what the phrase
+"world-first" is actually claiming, and a claim about a system that has not been built should not be
+settled as a side effect of documentation drift.
+
+### What would settle it
+
+1. **Name the deliverable concretely.** "busybox + musl, purecap, on our kernel" and "the Linux
+   kernel with `CONFIG_MMU=n` booting to a shell" are different sentences. Write the one intended.
+2. **Decide the syscall boundary.** Capability-passing (keeps the confused-deputy property, breaks
+   Linux compatibility) or integer-passing (Linux-compatible, loses it) or a validated shim that
+   converts and is itself the trusted surface. This is a security decision, not an ABI convenience.
+3. **Then re-word all four sites above to the single chosen sentence**, because the present drift is
+   what produced the wrong assumption that raised this question.
+
+Until then, no document should claim Linux applications run.
+
 ## Other honest open questions
 
 - **Determinism scope:** must be re-stated as "deterministic check path + resident/locked

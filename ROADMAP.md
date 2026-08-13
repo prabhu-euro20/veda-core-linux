@@ -246,6 +246,13 @@ verified switcher (kernel = ODA holder), IO-ODT for devices/DMA (object-based IO
 
 ### Phase 9 -- Linux ABI port
 
+> **OPEN DECISION, 2026-08-13:** "Linux ABI port" is used in this corpus to mean two different
+> projects -- the literal Linux kernel ported, or our own kernel exposing a Linux-compatible syscall
+> surface -- and four documents word it four different ways. The difference is multi-year effort,
+> what software can run, and where this architecture's confused-deputy property survives. See
+> DESIGN_06, "OPEN DECISION". **Until it is settled, no document should claim Linux applications
+> run.**
+
 UP nommu first, then SMP. Sequenced last deliberately; per DESIGN_06's calibration, a
 realistic single-person+AI horizon is Phases 1-5 plus a UP nommu purecap boot -- itself a
 world-first for an address-less ISA.
