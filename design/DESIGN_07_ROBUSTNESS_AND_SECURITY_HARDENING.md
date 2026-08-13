@@ -1114,6 +1114,49 @@ it is not re-discovered.
   compartment down; the teardown path must be able to release the pin, and that path is not yet
   specified.
 
+### R15. NMC_ADD writes memory and asked for no store permission -- on both layers
+
+**Status: fixed and verified on both layers (Sail 89/89, RTL 74/74, 51/51 ACT4, all mutants killed).**
+
+Found by an adversarial panel convened to choose a fault-identification channel, which instead
+reported that the channel was sixth of six blockers and that this one was live.
+
+`veda_check_nmc_access` gated NMC_ADD on **`Permit_NMC_Compute` alone**. The clause it guards calls
+`read_ram`, returns the loaded value in `rd`, and calls `write_ram`. The seeded fixture's
+`Perms = 0x100C` carries `Load|Store|NMC_Compute` together, so a capability with `Permit_Store`
+deliberately attenuated away **keeps bit 12 and the write lands**.
+
+That makes every store-side attenuation in the architecture advisory -- including the one DESIGN_02's
+copy-on-write is specified to be built on. It would have been a total COW bypass, on both layers,
+under a mechanism that had just been declared verified.
+
+**The decisive evidence was internal, not external.** Veda-Atomic is the identical
+read-modify-write shape, and `veda_atomic_insts.sail:34` says in as many words *"Permission: reuses
+Permit_Load + Permit_Store"*, passing `(true, true)` to the shared checker. Two read-modify-write
+families in one model, answering the same question two different ways. No document ever argued for
+the NMC exemption; it was simply never asked about. DESIGN_07's own consumer table two sections up
+lists `veda_check_nmc_access` with a "yes" -- for a *different* property (does it recheck
+valid/generation/resident), which is exactly the kind of adjacent green tick that makes an unasked
+question look answered.
+
+**Fix:** NMC_ADD now requires `Permit_Load` and `Permit_Store` in addition to
+`Permit_NMC_Compute`. The principle, stated so the next instruction that reads and writes inherits
+it: **a value reaching software from memory is a load, and a value reaching memory is a store,
+whatever single instruction performs them.** `Permit_NMC_Compute` remains an additional gate ("this
+object may be computed on near memory"), never a substitute.
+
+#### What this says about the enumeration one increment earlier
+
+RTL-12 claimed to have enumerated the store paths from the decoder. It found three -- OCS.D, OCS.C,
+Veda-Atomic -- and missed this one, because the question asked was *"where is the store-permission
+signal used?"* **A question phrased over the existing checks can never surface a path that has no
+check.** The question that finds NMC_ADD immediately is *"where is memory written?"*
+
+The sweep then made the same point a second time within this fix: the `.D` mutant died and the `.W`
+mutant lived, because the new test exercised only `.D`. Two widths are two decodes, two violation
+expressions and two cause muxes -- two sites, exactly as three store paths were three. Both variants
+are now covered and both mutants die.
+
 ### R14. Populate and Destroy refused SILENTLY -- the RTL never told anyone
 
 **Status: fixed and verified in RTL (73/73 smoke, 51/51 ACT4, 3/3 mutants killed). Sail was already
