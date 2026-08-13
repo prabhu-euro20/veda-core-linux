@@ -616,6 +616,51 @@ grounding that scoped this increment described three redundant call sites; there
 them structurally different from what was assumed, and building on that scoping would have produced
 a fix that passed its own tests and was wrong.
 
+#### STATUS after the fix landed -- partially verified, with one UNRESOLVED behaviour
+
+**Landed (Sail, commit e1660aec):** 86/86, and the confirmed proof-of-concept now fails, so the
+escape it demonstrated is gone. The chokepoint is the sole caller (eight inline saves removed);
+occupancy moved out of band to a depth counter; poison marks an unreconstructible chain; a poisoned
+unwind installs a zero-length PCC.
+
+**A Veda-specific case found only because the fix broke two tests.** A depth counter assumes a trap
+is left by an xret. This architecture has a second exit -- the trusted switcher leaves a handler by
+OCRETURN, and cannot do otherwise, because narrowing PCC with `csrw` then falling through to a
+separate `mret` requires fetching that `mret`, by then outside the narrowed bounds. Depth therefore
+incremented and never decremented. OCRETURN now abandons the frame, which follows from its already
+installing PCC from its own operand. That restored 86/86.
+
+**UNRESOLVED, and it may be a real defect in the fix rather than in the test.** A regression test
+written to pin the *lossless* property -- compartment bounded 0x0100, trap, nested trap, inner xret,
+outer xret, bounds expected intact -- observes the restored `veda_pcc_length` as **0**, the deny
+value, not 0x0100.
+
+Measured, not inferred: the trap count is exactly 3 as designed, and bisection confirms every stage
+is reached (compartment entered bounded, nested trap taken, outer handler resumed, compartment
+resumed and its ecall reached the verdict). So the flow is right and **the implementation is denying
+a case it was designed to reconstruct**.
+
+By the intended semantics the nested level carries no context -- PCC is unbounded and the region is
+root at that point -- so `veda_trap_level_has_context()` should be false and no poison should be
+set. Something makes it true, or the deny fires from the other branch. **Not diagnosed.**
+
+Consequences, stated plainly:
+
+- The **security** property holds either way: denying is fail-closed, and the escape is
+  demonstrably gone. Nothing is more permissive than before.
+- The **losslessness** claim is currently **unsupported**. A compartment that survives a nested trap
+  may be denied rather than resumed, which is a usability regression and would surface as a
+  compartment that cannot continue after any nested fault.
+- Therefore **no mutation sweep has been run**, because a sweep against a behaviour that is not yet
+  understood would measure the wrong thing and produce verdicts that look authoritative.
+
+The test is retained out of the globbed corpus as `poc_r12_nested_lossless_UNRESOLVED.S` so the
+suite reads an honest 86/86 rather than carrying a red test, and so the evidence is not lost.
+
+**Next step is diagnosis, not implementation:** instrument or expose depth/poison (0x7C8 is free in
+both layers) and determine which branch produces the zero-length PCC. The RTL mirror must not be
+started until this is settled -- mirroring a behaviour that is not understood would propagate it.
+
 #### Residuals, stated rather than closed
 
 - **Multi-hart.** "Refuse on the live PCC" is a single-hart answer; another hart's PCC is invisible.
