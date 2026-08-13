@@ -1114,6 +1114,46 @@ it is not re-discovered.
   compartment down; the teardown path must be able to release the pin, and that path is not yet
   specified.
 
+### R13. Destroy clears a slot it does not own -- Milestone 15's fix covered reads only
+
+**Status: found while mirroring R11(b), fixed and verified in RTL (73/73 smoke, 51/51 ACT4, 2/2
+mutants killed). Sail needs no change and cannot express the bug.**
+
+Milestone 15 found real low-byte aliasing in this core's 256-entry ODT model: Object_ID 32 and
+Object_ID 288 share a slot, and a Bind for 32 issued after 288 was populated silently returned 288's
+object. The fix stores the full Object_ID in the slot and requires it to match. **It was applied to
+the two read paths and to neither write path.**
+
+Destroy is an access too. `veda.odt.destroy 288` resolves to slot 32 and clears the valid and
+resident bits and bumps the generation of **object 32** -- a different, live object the caller never
+named. An authorized actor can therefore kill any object by naming any alias of it.
+
+Sail cannot express this. It indexes with the full 24-bit local (`VEDA_LOCAL_MODELED` = 2^20), so 32
+and 288 are genuinely different entries and destroying one cannot touch the other. This is the
+second finding in two increments where **a correct mechanism in the model is wrong in the hardware
+with no transcription error anywhere**, because the two layers identify a descriptor differently.
+That is now a class worth checking for deliberately rather than meeting twice by accident.
+
+**The fix is one term: Destroy's ODT write is gated on the identity tag.** If the slot's tag is not
+ours, the object we named is not in the table and Destroy has nothing here to do -- which is exactly
+what Sail does with it.
+
+Two things deliberately NOT changed:
+
+- **Gated on the tag, not on validity.** Sail's Destroy bumps the generation of an already-invalid
+  entry, and that must keep working. Only the identity is in question, never the liveness.
+- **Populate keeps its slot takeover.** That is Milestone 15's own deliberate semantics for a
+  256-slot model, and the displaced object then reads not-found rather than reading someone else's
+  data. Taking a free-able slot is reuse; clearing a slot you do not own is not. The two are
+  different acts and only one of them is a bug.
+
+Verified by `veda_smoke_r13_alias_destroy_neg.S`: after destroying the alias, object 32 still
+re-Binds, still reads its own data, and the capability minted *before* the aliased Destroy still
+works -- so no generation was bumped underneath it. The control matters as much: destroying 32 by
+its own name must still work, or a core that ignored every Destroy would pass the first half
+trivially. Mutation confirms both directions -- removing the tag gate is caught only by this test,
+and refusing every Destroy is caught by this test and by the Milestone 4 positive together.
+
 ### R12. Veda's trap save/restore is not nesting-safe, and the PCC half fails OPEN
 
 **Status: confirmed by execution. Not yet fixed -- the obvious fix introduces a mirror bug, so
