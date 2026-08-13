@@ -49,6 +49,65 @@ Stages: IF -> ID -> EX -> MEM -> WB. Additions:
   registers can overlap; the TCM ODT tier (M24) keeps hot binds at 1 cycle. Register
   pressure study (1.186x-1.561x) is the amortization model.
 
+## CORRECTION -- the 95 < 114 result does not answer the pipelined multi-hart question
+
+Recorded after being challenged on exactly this, and the challenge was right.
+
+The synthesis study measured **combinational gate depth in the single-cycle, single-hart core**,
+where `odt_mem` is a flat array read combinationally inside one long cycle. Quoting it as evidence
+that capability checks are free on the **pipelined multi-hart** line compares two different
+machines. Gate depth is not even the right unit once the design is pipelined -- the question becomes
+which stage the check lands in, whether it fits that stage's budget, and what structural hazards it
+creates.
+
+### An internal tension in this document, previously unnoticed
+
+This document states, of Bind: *"The ODT is DRAM-resident, so Object-Bind is a memory operation."*
+It then states, of the checks: *"Checks live in EX/MEM, combinational."*
+
+**Both cannot hold.** The per-dereference generation check reads that same DRAM-resident ODT. So on
+a pipelined core every load and store needs a **second memory access** beside its data access -- a
+structural hazard in MEM, and DRAM latency on the check path unless something covers it. The
+single-cycle core hid this entirely, because there a flat-array read costs nothing.
+
+The M24 TCM tier is the partial answer, at **32 entries**. That is a working-set assumption which has
+never been validated against any real workload.
+
+### What multi-hart adds, which DESIGN_03 does not cover
+
+DESIGN_03's claim -- cache-less by pillar, therefore no coherence protocol -- is sound for object
+**data**. But it also means every hart's every dereference goes to DRAM/MSA **for its ODT check**.
+N harts x one ODT read per dereference is N-fold read bandwidth on one shared structure. DESIGN_03
+discusses MSA bottlenecking for *shared-atomic* traffic only; ODT read bandwidth for **ordinary
+loads and stores** appears in neither document.
+
+**The cache-less pillar is therefore in direct tension with a per-access live-state check.** That
+tension is unresolved and is not a detail -- it is the central throughput question for this line.
+
+### A candidate direction, not a decision
+
+The generation check asks *"was this revoked?"* on every access. The alternative is to push the work
+to the revocation: when page-out or Destroy runs, invalidate every capability register naming that
+object -- a CAM across the 16-entry CRF. Revocation is rare; dereference is not. Capabilities spilled
+to memory are not in the register file, but they are reloaded by `OCL.C`, which is **already** a
+memory operation and can carry the check there. The per-dereference path would then need **no ODT
+read at all**.
+
+Its real cost, stated rather than hidden: on multi-hart, revocation becomes a **cross-hart
+broadcast** -- the coherence-like mechanism DESIGN_03 avoids. But it would sit on the rare path
+instead of the common one, which is the same trade that settled DESIGN_02's cached-Base decision.
+
+### What must be measured before any of this is decided
+
+1. ODT read bandwidth per hart per cycle under a realistic instruction mix.
+2. TCM hit rate for a real working set -- is 32 entries remotely enough, and for what?
+3. Whether the ODT read is a genuine structural hazard in MEM alongside the data access, or can be
+   dual-ported / banked away.
+4. MSA serialization behaviour at N harts for ordinary traffic, not just atomics.
+
+Until those exist, **no steady-state performance claim should be made for the pipelined multi-hart
+line**, and the 95 < 114 figure must be cited only for what it is: the single-cycle load path.
+
 ## Honest open items
 
 - **Superscalar / OoO** is out of scope for the first pipeline; note that capability
