@@ -718,6 +718,38 @@ occupancy is now out of band and depth 0 means no frame is owed. Two readings:
   happened to be true, not because anything was actually saved. That is the same conflation that
   produced R12, and preserving it preserves the root cause in a second place.
 
+**DECIDED 2026-08-13: it was an artifact of the sentinel.** Software-staged restore-on-mret is NOT
+a supported architectural feature. It fired because `mepcc_length != UNBOUNDED` happened to be true,
+not because a frame was owed -- the same conflation that produced R12, and keeping it would preserve
+the root cause in a second place.
+
+**Consequence: `veda_smoke_pcc_restore_on_mret.S` phases 2 and 3 must be rewritten to the post-R12
+contract.** This is a specification change, not a test adjustment, and the two phases encode the old
+contract explicitly in their own words:
+
+- **Phase 2** has the handler write `0xFFFFFFFFFF` into `mepcc_length` before mret -- literally
+  clearing the in-band sentinel to suppress the restore, so that execution resumes unbounded. Under
+  the decision above that mechanism no longer exists: occupancy is out of band, and software cannot
+  suppress a restore by writing a value. **Rewrite to:** software may still influence WHAT is
+  restored by writing `0x7C2`/`0x7C3`, because that grants no authority it does not already have via
+  `0x7C0`/`0x7C1` -- but it may not influence WHETHER a restore happens. Assert that a
+  software-written mepcc IS restored at the outermost unwind, and that writing the sentinel no
+  longer suppresses it.
+- **Phase 3**'s own comment states it is validating *"the new conditional-capture guard correctly
+  skips it"* -- i.e. it exists to test the guarded capture that came from the false comment.
+  **Rewrite to:** a nested trap must leave the outer save intact (now because depth != 0, not
+  because a value comparison skipped the capture), the inner unwind must reconstruct the reset
+  context, and the outer unwind must restore the real bounds. That is the same property the Sail
+  test `vc_r12_nested_lossless` already pins, so the two layers end up asserting one contract.
+
+**State at handover:** the RTL patch is complete and preserved at
+`scratchpad/rtl8_r12_mirror.patch` (103 lines, applies cleanly). The RTL tree is reverted to green
+at 70/70 so nothing is left red or half-applied. The remaining work is the test rewrite above, then
+re-apply the patch and re-run -- at which point the expected result is 70/70 with phases 2 and 3
+asserting the new contract.
+
+**Historical note (the question, before it was decided):**
+
 **Not decided here, deliberately.** The RTL change is reverted so the suite stays green at 70/70,
 and the complete patch is preserved at `scratchpad/rtl8_r12_mirror.patch` so no work is lost. What
 must be settled first: **is a software-staged mepcc restore-on-mret a supported architectural
