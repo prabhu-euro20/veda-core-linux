@@ -565,6 +565,57 @@ is the only producer of {valid, non-resident} and it always bumps. It is kept an
 soundness argument is a property of the current producer set, not of the checker, and DESIGN_02
 still has `cow` and `backing` to add.
 
+#### IMPLEMENTATION BLOCKER found before editing -- nine call sites, not one
+
+The fix was scoped as "add an out-of-band validity bit and a nesting guard". Enumerating the real
+call sites of `veda_pcc_save_and_reset()` before touching anything shows why that scoping is wrong:
+
+| site | kind |
+|---|---|
+| `postlude/step_ext.sail:248` | the trap chokepoint `handle_trap_extension`, **guarded** |
+| `postlude/step_ext.sail:94` | fetch-check error path |
+| `postlude/step_ext.sail:174` | data-check error path |
+| `extensions/Veda/veda_bind_insts.sail:128` | inside `veda_trap()` |
+| `veda_regs.sail:372, 376, 380, 384, 409` | **five CSR-escape write gates** |
+
+**Nine, and the last five are different in kind.** They read
+`if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }` -- they are
+not trap-entry hooks, they are *inline traps*: a compartment attempting a CSR escape is saved,
+reset, and then errored out, and the `Err` subsequently raises a real exception that reaches the
+chokepoint too.
+
+**Two separate hazards follow, and they pull in opposite directions.**
+
+1. **Double-accounting.** One logical trap can reach the save twice -- once inline at a CSR gate,
+   once at the chokepoint. Today the chokepoint's guard
+   (`pcc_length != UNBOUNDED | current_region != 0`) accidentally prevents this, because the first
+   call has already reset both. Any design that makes the second call unconditional -- which a depth
+   counter requires, since it must count every trap -- **breaks that accident** and counts one trap
+   as two.
+
+2. **Undetectable nesting.** The mirror problem. On a genuinely nested trap the live state is
+   *already* reset (PCC unbounded, region 0), so the same guard is **false** and no save is
+   attempted -- meaning the nesting is never observed at all. A design that only acts where the
+   guard fires therefore cannot see the case it exists to catch.
+
+So the trigger question ("is a compartment live, and does its context need saving?") and the validity
+question ("is a save already outstanding?") are **genuinely different predicates that must be tested
+at different places**. The in-band sentinel is sound for the first and unsound for the second, which
+is the root cause restated precisely. Conflating them is what produced R12 in the first place, and a
+naive validity bit would reproduce it in a new shape.
+
+**Consequence for the fix.** Either the chokepoint becomes the sole caller -- deleting the other
+eight, which needs the Milestone 20 ordering rationale for the inline CSR-gate saves to be
+re-derived and disproved first -- or the nesting detection is split out of the save entirely and
+placed where it fires exactly once per trap. Neither is a small edit, and choosing wrongly converts
+a silent escape into a spurious fail-closed on ordinary CSR traps, which the corpus would surface as
+a wave of unexplained failures.
+
+**Status: not implemented.** Recorded at the boundary deliberately rather than half-edited. The
+grounding that scoped this increment described three redundant call sites; there are eight, five of
+them structurally different from what was assumed, and building on that scoping would have produced
+a fix that passed its own tests and was wrong.
+
 #### Residuals, stated rather than closed
 
 - **Multi-hart.** "Refuse on the live PCC" is a single-hart answer; another hart's PCC is invisible.
