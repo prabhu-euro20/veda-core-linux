@@ -657,6 +657,40 @@ Consequences, stated plainly:
 The test is retained out of the globbed corpus as `poc_r12_nested_lossless_UNRESOLVED.S` so the
 suite reads an honest 86/86 rather than carrying a red test, and so the evidence is not lost.
 
+**RESOLVED -- the defect was in the TEST, and the retraction is recorded in full because the
+reasoning that produced it was wrong twice over.**
+
+Final measurement: a sentinel written into x23 *before* entering the compartment is **still present**
+at the verdict. So the compartment **never resumed** after the outer mret, and every reading of x23
+and x17 was of a register that was never written -- `0` was simply their reset value.
+
+Two conclusions follow, and both were previously stated with more confidence than they deserved:
+
+1. **"The implementation denies a case it was designed to reconstruct" was WRONG.** It rested on
+   x23 == 0, which was not a measurement. The deny path never fired; the readings that WERE real --
+   depth 1 -> 2 -> 0 across the nesting, and `veda_mepcc_length` holding 0x0100 intact immediately
+   before the outer mret -- all show the mechanism behaving exactly as designed.
+2. **The "contradiction" that appeared to localise a fault in the restore was not a contradiction.**
+   Three facts appeared to conflict; two of them were not facts.
+
+**The lesson, which is the durable part.** `0` was simultaneously the reset value of the observing
+register, the deny value of the mechanism under test, and therefore indistinguishable from "this
+instruction never executed". A probe whose failure value collides with its own meaningful value
+cannot report anything. The sentinel should have been written first -- that is one instruction, and
+it would have prevented an entire diagnostic detour built on top of a non-measurement.
+
+This is the same shape as two earlier findings this session, and the third instance of it: the dead
+`odt_mem[16*5+9]` conjunct in tb_veda_smoke_m4_neg that read an always-zero spare byte, and the
+`rd = 0` assertion that passed because rd's reset value was already 0. **Ask not whether a probe
+returns the right answer, but whether it could return a wrong one.**
+
+**What remains genuinely open** is narrower and different from what was recorded before: the
+compartment does not resume after the outer mret, and the third trap was therefore not its ecall.
+That is a question about mepc handling across a nested trap in the test, or about the resume path --
+not about the depth/poison mechanism, which is now measurement-verified.
+
+**Historical note (superseded, kept so the reasoning is auditable):**
+
 **DIAGNOSIS PROGRESS (measured via the new read-only CSR 0x7C8, not inferred).**
 
 State sampled at every stage of the reproduction:
