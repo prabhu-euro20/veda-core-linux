@@ -221,6 +221,18 @@ Added 2026-08-12, from grounding increment 2. These are real gaps, not polish:
   insufficient alone: it says *which* object, not *where inside it*, and it raises
   recursion (the backing object has its own `resident` bit) and bootstrap questions that
   need a pin/lock concept that does not exist yet.
+- ~~**No way to change a policy field without collateral damage**~~ -- **CLOSED, both layers
+  (2026-08-14).** `veda.odt.set.domain` writes `owner_domain` and nothing else; the generation is
+  deliberately not bumped, so narrowing an object does not kill the capabilities of those still
+  entitled to it. The line drawn, and it governs every future field: **identity changes cost a
+  generation bump, policy changes do not.** Base, Length, generation, valid and retired stay
+  unreachable from this instruction and it must never become a general field-write -- that would
+  turn the ODT into an ordinary table with a security story bolted on. Page-out, page-in and Destroy
+  PRESERVE the field, so policy survives paging; if eviction cleared it an object could be
+  un-narrowed by evicting and returning it. Sail 90/90, RTL 77/77 + 51/51 ACT4, 2/2 mutants killed
+  on each layer -- including, on both, the mutant that bumps the generation, which is the one that
+  matters. This unblocks the `cow` bit, which needs exactly the same write path.
+
 - **There is no way to read an ODT entry field at all.** No instruction reads an entry
   into a GPR -- the query family reads the *capability register*, never the table. So a
   pager cannot read `backing` back by any means today. Writing it is cheap (a second CSR,
