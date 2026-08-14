@@ -1114,6 +1114,127 @@ it is not re-discovered.
   compartment down; the teardown path must be able to release the pin, and that path is not yet
   specified.
 
+### R17. veda.bind had no authority gate -- a name WAS the authority
+
+> **RETRACTED THE SAME DAY IT WAS BUILT, and the retraction is the finding.**
+>
+> The rule below -- *a compartment may bind only within its own domain* -- passed all 77 RTL tests
+> and then sent the Sail test `vc_r10_crbr_invoke_trap_return` into an infinite loop. Investigating
+> that loop produced the real result, which is more valuable than the rule was:
+>
+> **A compartment's RETURN PATH is, by construction, in another domain.** That test builds a
+> region-1 compartment and, from inside it, binds three region-0 objects: its return code object,
+> its return data object, and the type authority. It has to. The caller lives in another domain --
+> that is what "another domain" means. So a rule that forbids cross-domain Bind does not merely
+> refuse an attack; **it makes compartments one-way. Nothing can ever return.** The livelock was the
+> architecture saying so: bind refused, trap, handler, mret, same bind, forever.
+>
+> I had reasoned carefully about "who may be given authority" and not at all about "how does anyone
+> get back". The design panel, three judges and an adversarial reviewer all missed it too; the
+> corpus caught it, and only because one test exercises a genuine cross-domain return.
+>
+> **What this rules out, and what it points at.** Region-granular authority is the wrong shape: the
+> unit that needs permission is the OBJECT, not the domain, because legitimate sharing is
+> per-object and crosses domains by design. The panel's Proposal D (generalise the existing
+> per-object `owner` from a HART to a DOMAIN) survives this argument intact -- an object can then be
+> marked shareable while its neighbours are not. That is the direction to take, and it needs the
+> ODT field-write path that DESIGN_02 already lists as missing.
+>
+> **Also fixed as a direct consequence:** the Sail runner now passes `--inst-limit 2000000`. A
+> livelocking test used to hang the whole suite instead of failing -- this one consumed two and a
+> half hours in silence. That mitigation had been recommended in the record for a long time and
+> never applied. It is applied now, on both runners.
+>
+> Kept below in full, because the reasoning about SUBJECT SELECTION is still correct and will be
+> needed by whatever replaces it.
+
+### R17. veda.bind had no authority gate -- a name WAS the authority
+
+**Status: fixed on both layers. RTL 76/76 smoke, 51/51 ACT4, 2/2 mutants killed. Sail mirror
+built; corpus result pending at time of writing.**
+
+This is the largest security decision taken in this design so far, so the reasoning is recorded in
+full rather than summarised.
+
+#### The hole
+
+`veda.bind` took a 44-bit Object_ID from an **ordinary GPR** and, if the entry existed, minted a
+**tagged, unsealed capability carrying the table's full permissions**. Its only gates were region
+residency (paging state, not membership), `e.valid`, and `owner_hart` (a claim, vacuous on one
+hart). No privilege test. No authority operand. No membership check.
+
+So a name in a register plus one instruction produced full authority over the named object, from any
+privilege level, from inside any compartment. Three consequences, all verified:
+
+- **CSeal protected nothing against a recipient.** Given the name, they re-bind and get it unsealed
+  with full permissions.
+- **Region was not a protection boundary for Bind.**
+- **DESIGN_00's isolation claim was true and irrelevant.** It says domain A "cannot forge" a
+  capability to B's object. A never needed to forge one -- the hardware minted it on request.
+
+An identifier that both names a thing and grants it is not a capability. The system had, quietly,
+stopped being capability-based at its most important instruction, while listing "capability-based"
+as a pillar.
+
+#### The rule
+
+**A compartment may bind only within its own domain. Code running in no compartment -- boot and trap
+handlers -- is unrestricted.**
+
+#### DECISION 1 -- the subject is PCC's object name, NOT the current-region register
+
+An authority rule needs to know who is asking, and this design has two candidate answers.
+
+`veda_current_region` looks like the obvious one and is **wrong**. It is zero at reset and reset
+again on every trap, and **region zero is also a real domain** -- so "no domain" and "domain 0" are
+the same value. A rule built on it would hand every trap handler domain 0's authority while looking
+exactly like a lock. This project has already paid once for a value that meant two things at once.
+
+`veda_pcc_object` has `VEDA_OBJECT_NONE`, out of band by construction (its region field is
+`VEDA_REGION_NONE`, which no region-table window resolves), so the two states are genuinely
+distinct. It is also already mutation-tested, by R11(b).
+
+Worth recording: **the subject this rule needs did not exist six months ago.** R10 built the current
+region and R11(b) built PCC's object identity, both to close unrelated bugs. Together they made the
+hardware able to answer "who am I", which is the precondition for any authority check at all.
+
+#### DECISION 2 -- the check runs FIRST, ahead of existence
+
+Order is a security property here. If the table were consulted first, the cause returned would still
+tell a compartment whether a foreign object **exists** -- and `veda.bind.notrap` makes that a silent
+oracle. Refusing on identity before reading anything closes the oracle and the escape with one
+check.
+
+#### DECISION 3 -- its own cause (0x0B), not a reuse
+
+`OWNER_VIOLATION` (0x06) means another **hart** holds it: release it. `REGION_FAULT` (0x09) means
+that domain's table is paged out: page it in. This is a third thing -- **you were never entitled to
+it, and there is nothing to repair.** Conflating them sends software to fix what is not broken. Same
+argument that gave residency its own cause rather than reusing the region fault.
+
+#### DECISION 4 -- boot and handlers stay unrestricted, deliberately
+
+This is not a loophole left open. It is the bootstrap, the pager, and the only code that can
+legitimately hand objects between domains. Narrowing it requires a delegation mechanism that does
+not exist yet, and inventing one here would be building the second half of a bridge before the
+first. **The mutation sweep quantified how load-bearing it is: removing the exemption fails 69 of 76
+tests** -- the machine does not boot without it.
+
+#### Cost: zero additional table reads
+
+One comparison of two 20-bit fields already sitting in registers. No ODT read, no region-table read.
+On a machine deliberately built without caches, an extra table read would be permanent added latency
+on every Bind, not a rounding error -- which is precisely why the C-list designs were rejected in
+favour of a subject the hardware already holds.
+
+#### What this does NOT close, stated plainly
+
+- **Intra-region isolation.** Many objects share a region, and a compartment may still bind any of
+  them. This closes cross-domain minting, not per-object membership. The per-domain capability table
+  DESIGN_00 and DESIGN_05 describe remains unbuilt.
+- **Anything boot or a trap handler does.** By design, above.
+- **The namespace oracle within your own region.** Enumeration inside your own domain is still free.
+
 ### R16. A failed Bind handed back the slot's real Base -- an address leak through the silent probe
 
 **Status: fixed and verified in RTL (75/75 smoke, 51/51 ACT4, 2/2 mutants killed). Sail was already
