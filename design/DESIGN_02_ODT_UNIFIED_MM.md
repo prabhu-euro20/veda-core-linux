@@ -175,6 +175,32 @@ This matters directly to the mechanism below. The COW correction already notes t
 sharing is only advisory because Bind re-mints full permissions. What the RTL added on top is that
 the advisory path did not work either.
 
+**BUILT AND VERIFIED IN SAIL (2026-08-14): 92/92, 4/4 mutants killed.** Three decisions, each
+tested by its own mutant, and one of them departs from what this document proposed:
+
+1. **The COW fault gets its OWN cause (0x0C), NOT a reuse of the store-permission violation.** This
+   document proposed reusing 0x13. Reusing it collapses two situations that demand opposite
+   responses -- "this program has a bug, it may not write here" and "this is copy-on-write, make a
+   private copy and retry" -- and since no instruction reads an ODT entry, the handler cannot
+   inspect the `cow` bit to disambiguate. It would turn every genuine permission fault into a silent
+   private copy: a security fault converted into a performance feature. Same argument that gave
+   residency its own cause rather than reusing the region fault.
+
+2. **The fault reads the ENTRY, not the capability.** `set.cow` deliberately does not bump the
+   generation, so capabilities minted BEFORE an object became copy-on-write are still live and still
+   carry store permission. At `fork` the parent holds exactly such a capability and it is the first
+   one that will be written -- a check reading the capability would miss precisely the case the
+   mechanism exists for.
+
+3. **The attenuation lives in Bind**, per this document's own correction. A store-stripped capability
+   handed to someone is only advisory while they can re-Bind the name and receive a fresh,
+   fully-permissioned one.
+
+**NMC_ADD is covered too.** The first draft hooked one store path; the question "where is memory
+WRITTEN" -- not "where is the cow bit already read" -- surfaces NMC_ADD immediately. That is the
+identical path R15 found missing the store permission entirely one increment earlier, and leaving it
+out would have made copy-on-write bypassable by the same route.
+
 `fork` (DESIGN_00: child = new domain) marks the parent's writable data objects `cow`
 in the ODT; parent and child both hold read-only-attenuated capabilities (CAndPerm,
 DESIGN_01) to the same Object_IDs. Read-only objects (text) are shared as-is. On the
