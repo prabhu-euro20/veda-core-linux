@@ -1114,6 +1114,38 @@ it is not re-discovered.
   compartment down; the teardown path must be able to release the pin, and that path is not yet
   specified.
 
+### R16. A failed Bind handed back the slot's real Base -- an address leak through the silent probe
+
+**Status: fixed and verified in RTL (75/75 smoke, 51/51 ACT4, 2/2 mutants killed). Sail was already
+correct; this was a divergence, and the model was the safe side.**
+
+`veda.bind.notrap` is the deliberately SILENT probe -- it soft-fails rather than trapping. On
+failure this core wrote the resolved slot's Base, Length, Perms and Object_ID into the destination
+register and cleared only the Tag. The comment at that mux called those fields *"dead either way
+once Tag=0"*.
+
+They are not dead. **The capability query family is deliberately not tag-gated** on either layer, so
+`cgetbase` after a failed probe returned the **raw physical Base of whatever live object occupies
+that slot**. Sail writes `zero_capability` on the identical failure.
+
+Three things make this worse than an ordinary information leak:
+
+1. **It breaches the address-less pillar directly.** Software is not supposed to be able to see a
+   physical address at all. This handed one over for an object the caller does not own.
+2. **It is silent by design.** The leak is through the one Bind mode that deliberately does not
+   trap, so nothing anywhere observes the probe. A noisy leak leaves evidence; this one does not.
+3. **It needs no secret.** Guess a number. The namespace is enumerable, and R11(b)'s own analysis
+   already established that `veda.bind.notrap` + `CGetTag` is a free existence oracle -- this
+   upgraded it to a metadata oracle, and metadata here means addresses.
+
+**Fix:** one named predicate, `$veda_bind_ok = $veda_odt_valid && $veda_owner_ok`, now gates the
+DATA fields as well as the Tag, zeroing them on failure exactly as the model does. Found by an
+adversarial panel convened for a different question entirely.
+
+This is the fourth comment in this session that asserted something the code did not do. The pattern
+is stable enough to name: **a comment explaining why a check is unnecessary is itself a finding to
+verify, not a reason to skip verifying.**
+
 ### R15. NMC_ADD writes memory and asked for no store permission -- on both layers
 
 **Status: fixed and verified on both layers (Sail 89/89, RTL 74/74, 51/51 ACT4, all mutants killed).**
