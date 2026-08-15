@@ -487,6 +487,55 @@ on the current region) does not generalize for free.
 
 ## Tier H -- found by adversarially reviewing our own just-shipped increment
 
+### R19. Copy-on-write needs a copier, and a copier needs universal read authority
+
+**Status: OPEN. Not a bug in anything built -- a consequence of what was just completed, noticed
+before it hardened into a convention.**
+
+The `fork` hardware chain is now complete on both layers: policy write path, per-object bind
+authority, the `cow` bit, Bind attenuation, the COW fault on all five write paths, and
+CGetObjectID so a handler can identify the faulting object. The remaining piece is the **copy
+itself**, and the obvious plan is "the handler does it in software". That plan has a consequence
+nobody has decided to accept.
+
+**A COW handler must be able to read ANY object**, because any object may be marked copy-on-write.
+So it needs universal read authority. Three verified facts make that concrete:
+
+- `veda.bind`'s destination capability index lives in the **instruction encoding**
+  (`encdec_vcap(rd)`), not in a register, so a handler cannot rebind "whichever register faulted"
+  without a 16-way dispatch.
+- `veda.odt.populate` requires Machine privilege or the ODA, which the handler already holds.
+- **There is no object-copy mechanism in hardware at all** -- grep finds none in either layer.
+
+And the handler runs with `veda_pcc_object == VEDA_OBJECT_NONE`, so it passes the per-object bind
+gate built this session **by design**. That exemption is correct -- it is the bootstrap and the
+pager -- but combined with a copier it means: *to support `fork`, this architecture must contain one
+piece of code that can read every object in the machine.*
+
+**Why that is a problem HERE specifically.** In a conventional system this is unremarkable; the
+kernel reads everything. But the thesis of this design is that security should not rest on one
+trusted component behaving correctly. A universal copier reintroduces exactly that, and it arrives
+by accident rather than by decision.
+
+**The options, none chosen yet:**
+
+- **(a) Software copier, accepted.** Simple, needs no new hardware, and honestly concedes a trusted
+  component. It should then be named as one in the pillar accounting rather than left implicit.
+- **(b) A hardware copy instruction** -- `veda.odt.cow.split` or similar -- where hardware performs
+  the copy and clears the bit, so no software ever needs read authority over the source. This is the
+  hardware-first answer and matches the standing rule. Its cost is a multi-cycle memory operation
+  inside an instruction, which lands in the same bucket DESIGN_02 already put paging in
+  ("inherently non-deterministic ... pageable objects are best-effort"), so it does not breach the
+  determinism pillar so much as extend an existing, already-recorded concession.
+- **(c) A narrow copy capability** -- authority to copy *one named object* into *one named object*,
+  granted per fault rather than standing. Keeps the copier in software but removes the universal
+  authority, at the cost of a new authority type.
+
+**What settles it is a measurement, not an argument:** how long a hardware copy of a realistic
+object takes, against how much of the machine's security surface a universal software copier adds.
+Neither number exists yet. Recorded now, before "the handler does it" becomes the answer by default.
+
+
 ### R11. The domain crossings never revalidate the code object -- execute-after-free
 
 **Status: confirmed by execution, fixed in Sail, RTL mirror pending.**
