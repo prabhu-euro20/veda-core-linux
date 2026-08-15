@@ -487,6 +487,115 @@ on the current region) does not generalize for free.
 
 ## Tier H -- found by adversarially reviewing our own just-shipped increment
 
+### R20. WITHDRAWN before it was acted on -- "the memory-tier timing leaks physical addresses"
+
+**Status: NOT A FINDING. Recorded because the refutation is more useful than the claim was.**
+
+The claim: Milestone 24's TCM tier charges a DRAM stall only on a miss, and for OCL.C/OCS.C the hit test is
+`$veda_capmem_tcm_hit = ($veda_real_addr[31:0] >= TCM_SCRATCH_BASE) && (< BASE+SIZE)` where
+`$veda_real_addr = $veda_rs1cap_base + $rs2_data` -- a secret physical Base plus an attacker-controlled offset.
+Sweep the offset, find the timing flip, recover the Base. A timing breach of the address-less pillar.
+
+It was filed for adversarial refutation before being recorded as real. Six independent angles attacked it. It died,
+and two of its numbers were wrong as well:
+
+- **The premise is false. `cgetbase` already returns the Base to any capability holder, unprivileged and untrapped,
+  on both layers** -- RTL `veda_core.tlv:3205` returns the identical signal via the identical operand field as the
+  alleged channel, `$reg_write` at :4717 carries a bare `$is_veda_capquery ||` with no violation, tag, seal, or
+  privilege term, and the code says so on purpose at :1518 ("No permission or bounds checks on the query family at
+  all -- deliberately"). Sail matches at `veda_cap_insts.sail:149`. A channel that recovers a value one instruction
+  already hands over leaks nothing. **Information gain: zero.**
+- **Recoverability was overstated by 24 bits.** The comparison at :3118 is on `$veda_real_addr[31:0]`; Base is [55:0].
+- **Cost was understated by five orders of magnitude.** Membership in a 4 KiB window is not monotone, so there is no
+  binary search -- a strided linear scan of ~2^20 probes, not ~32.
+
+**What this cost, and what it bought.** The claim was wrong, and stating it as a finding would have sent real work
+after a phantom. What the refutation produced instead -- because three of the six angles kept reading after their
+assigned target died -- is R21 below, which is worse, needs no clock, and had been sitting in the same expression.
+
+### R21. The Milestone 24 stall swallows its own trap, fail-open
+
+**Status: FIX 1 APPLIED (security). FIX 2 SPECIFIED, NOT APPLIED (correctness). Unreachable in the shipped build.**
+
+At `DRAM_EXTRA_CYCLES != 0`, an OCL.C/OCS.C (or a bind) that BOTH violates AND misses the TCM tier:
+
+1. `$veda_dram_stall_req` (:1447) fires. Its only trap term was `!$veda_pcc_violation` -- a **fetch-side** check.
+   It never referenced `$veda_oclc_violation`, `$veda_ocsc_violation`, or any bind refusal.
+2. Simultaneously `$veda_trap_taken` = 1, `$pc_src` = 1, `$alt_pc` = `$mtvec`.
+3. The `$pc` mux (:1039) ranks `>>1$veda_dram_busy` **above** `>>1$pc_src`, so the PC freezes and **the mtvec
+   redirect is discarded**. There is no pending-trap latch.
+4. `$instr` is forced to NOP for every stall cycle (:1101), so `$pc_src` reads 0 out of all of them. When busy
+   clears, the mux falls through to `>>1$pc + 4`. **The handler is never entered.**
+5. But every trap **state** effect, gated on `>>1$veda_trap_taken`, still fires:
+   `$veda_pcc_length := 40'hFFFFFFFFFF` (**unbounded**), `$veda_pcc_base := 0`, `$veda_current_region := 0`,
+   `$veda_pcc_object := VEDA_OBJECT_NONE`, `trap_depth++`.
+
+**An attacker deliberately faults one OCL.C on a DRAM-tier address and keeps running its own instruction stream at
+pc+4 with the compartment PCC bound removed and the region reset to 0.** That is a compartment escape, not an
+information leak. No clock, no sweep, no statistics.
+
+The same mux also silently swallows ordinary taken branches, JAL/JALR, OCInvoke/OCReturn and mret -- a separate
+functional-correctness bug at the same place.
+
+**The most instructive detail: the author had already found this hazard, on the other side.** The comment at
+:1436 states the `!$veda_pcc_violation` guard exists precisely so "a faulting fetch must not spuriously start a
+stall that would then eat into the trap-handling flow." The guard was correct and was simply never extended to the
+data side. A known hazard class, incompletely applied -- an oversight, not a decision.
+
+**FIX 1, applied.** Gate the stall on the trapping conditions. The bind arm needs **all four** of its refusal terms,
+not just `$veda_bind_trap`: `$bind_wr_en` (~:2424) gates on bind_trap, domain_violation, region_fault AND
+residency_fault, while `$veda_bind_trap` alone is only owner||notfound (:1974). The reviewing judgement recommended
+`!$veda_bind_trap` alone; applied verbatim that would have left three of the four escape paths open. Checked against
+`$bind_wr_en`'s own term list rather than taken on trust.
+
+The edit is **strictly monotone** -- it only ever removes stalls, and only on paths that trap anyway. It cannot
+create a stall that did not exist, so it cannot open a new escape.
+
+**FIX 2, specified but deliberately NOT applied.** Latch a redirect that coincides with the start of a stall and
+replay it when busy clears, ahead of the pc+4 fallthrough. This is what fixes the swallowed branches, jumps and
+mret. It is **not** applied in the same increment because it restructures the `$pc` mux -- the most safety-critical
+expression in the core -- and unlike FIX 1 it is not monotone. It goes in on its own, with its own test.
+
+**Reachability, stated plainly and NOT counted as a defence.** `DRAM_EXTRA_CYCLES = 0` (:188) plus the
+`!= 0` guard make `$veda_dram_busy` a structural constant 0, so neither bug is reachable in the shipped build.
+But the nonzero default is named in the file itself as planned follow-up work, and E was swept {0, 10, 50} during
+verification. **Widening the 46 test budgets to enable nonzero E is now blocked on FIX 2 and its test**, and that
+follow-up must not be treated as mechanical.
+
+**Why the existing suite could not catch it.** M24 verified the stall with a **positive latency test only** -- a
+faulting access during a stall was never exercised. Identical in shape to the CAndPerm defect: *tested as
+bookkeeping, never as enforcement.* The most important mutant for the new test is therefore not a code mutation at
+all but `DRAM_EXTRA_CYCLES = 0`, which must make the test **error or skip, never silently pass** -- otherwise the
+whole bug class hides behind E=0 forever, which is exactly how it survived M24.
+
+**Layer note.** This is RTL-only and has no Sail counterpart: Sail has no TCM, no stall, and no timing domain at
+all (`mcycle` ticks once per instruction step). That is itself a hazard worth naming -- **this class of bug cannot
+be caught by Sail-versus-RTL parity review, because the layer that would catch it does not model the mechanism.**
+
+### R22. The corpus contradicts itself on the address-less pillar
+
+**Status: OPEN. Pre-existing, independent of Milestone 24, surfaced by R20's refutation.**
+
+R16 in this document states "Software is not supposed to be able to see a physical address at all." Meanwhile
+`cgetbase` ships returning a raw physical Base and `cgetaddr` returns Base+Offset resolved, both unit-tested to
+exact physical values (`veda_smoke_m11.S:34` expects 0x80011000). Milestone 19 made a leaked address **unusable**
+(the purecap violation) but never made it **unlearnable**. Both sentences cannot be true.
+
+Resolve it one way or the other -- either amend the pillar's wording to the invariant actually built ("software
+cannot REACH memory by a raw address"), or gate `cgetbase` in a hardened profile. Do not leave both standing.
+
+There is also a **specification gap** underneath: nothing in the corpus states a timing non-interference
+requirement at all. Pillar 3's wording is worst-case-execution-time shaped, which is a jitter property, not a
+secret-independence property. That silence is what allowed R20 to be filed as a pillar breach. Write down one of:
+
+- *"Veda-Core makes no timing non-interference claim; tier selection may depend on physical placement, which is
+  allocation-time and software-declared."* -- in which case :3118 is fine as written and R20 is permanently moot; or
+- *"Tier selection must not depend on any value software cannot already read architecturally."* -- in which case
+  :3118 is conformant **only because `cgetbase` is open**, and must be narrowed in the same commit that ever gates it.
+
+The dependency runs R22 -> the timing rule -> whether :3118 needs narrowing. It should be decided deliberately,
+not settled by whichever way `cgetbase` happens to drift.
+
 ### R19. Copy-on-write needs a copier, and a copier needs universal read authority
 
 **Status: OPEN. Not a bug in anything built -- a consequence of what was just completed, noticed
