@@ -487,6 +487,87 @@ on the current region) does not generalize for free.
 
 ## Tier H -- found by adversarially reviewing our own just-shipped increment
 
+### R19 DECIDED -- and the question dissolved rather than resolved
+
+**Status: DECIDED. All three recorded options rejected as posed. The premise was false.**
+
+R19 asked: does supporting `fork()` force this architecture to contain one piece of code that can read
+every object? **The answer is no, and it never did.**
+
+`veda_bind_perms` is `if e.cow then e.Perms & 0xFFF7 else e.Perms` (`veda_regs.sail:822-823`, mirrored at
+`veda_core.tlv:2795`). The mask `0xFFF7` clears **bit 3 only**. PERM_STORE is bit 3; **PERM_LOAD is bit 2**
+(`veda_types.sail:190-191`). So a COW-attenuated capability **is a read capability** -- which is exactly why
+the fault is a store fault and not a load fault.
+
+**The principal that takes the 0x0C fault already holds read on the object it needs copied.** The copy is
+performed by the faulting domain with capabilities it already has. That is option **(d), self-service**,
+which R19 did not list. Options (a), (b) and (c) were all payments to avoid granting an authority the right
+party already holds.
+
+**Six corrections to the R19 framing, recorded because they are worth more than the decision.**
+
+1. **The premise is false** -- see above.
+2. **"It arrives by accident rather than by decision" is wrong.** Universal content-read already exists two
+   ways: `veda.odt.populate.fast` / `page.in` write a full 56-bit physical Base from a GPR with **zero range
+   validation**, gated only Machine|ODA; and `veda.bind` needs no capability and no ODA at all -- only the
+   domain gate, which every handler passes. It was decided, argued and **quantified**: DESIGN_05 defines
+   kernel = ODA holder deliberately, Rev-F rejected the lattice that would remove it as disproportionate,
+   and R17 Decision 4 measured the handler exemption at **69 of 76 tests failing without it**.
+3. **The 93/93 and 80/80 contain ZERO evidence about copying.** Both "COW repair" tests repair by executing
+   `veda.odt.set.cow x28 <- 0` -- **clearing the bit and copying nothing** (`vc_cow_repair.S:88` and its RTL
+   twin), and both sidestep the dispatch problem by asserting the faulting index is `c0`. What is verified
+   end-to-end is fault -> identify -> clear -> retry. Calling the fork chain "complete on both layers"
+   overstated what those numbers cover; the chain is complete **up to the point where the mechanism would
+   first do work.**
+4. **Option (b) was costed against machinery that does not exist** -- see the correction now struck into
+   DESIGN_02. There is no MSA in either layer.
+5. **"What settles it is a measurement, not an argument" was wrong twice.** The measurement cannot be taken
+   (no DRAM model exists in the repo; the controller is unbuilt and sits in an unstarted phase), and the
+   security half needs no measurement at all -- Arm's `CPY*T*`/`CPY*RT*` variants demonstrate in production
+   silicon that hardware can copy without the issuer exercising its own authority over the source.
+   **A throughput measurement must never be allowed to decide a security question.**
+6. **The hard part was never the copy. It is the rename.** `csetbounds` and `CAndPerm` preserve Object_ID and
+   generation while carrying a different cached Base, and there are 16 capability registers plus unbounded
+   tagged spills -- so a domain routinely holds **N capabilities to one object, only one of which faults**.
+   Rebind that one and the other N-1 silently keep reading the pre-copy object while writes land in the copy.
+   **The domain's view of its own memory forks in two, and nothing traps.** Hardware cannot even detect it:
+   there are no back-references from objects to capabilities, and the only per-entry lever is the generation
+   bump, which is indiscriminate.
+
+**Why option (b) is rejected on official precedent rather than taste.** IBM shipped the interruptible
+whole-operand copy in 1964 (MVCL), held the interruptible category to seven instructions for the
+architecture's life, documented a real machine taking a protection exception where "the move continues into
+the subsequent blocks of the first operand, which are not protected" with the progress registers possibly
+stale -- and then **replaced it**: the z/Architecture Principles of Operation carries a section titled
+"Condition-Code Alternative to Interruptibility", and MVCLE is explicitly intended for use in place of MOVE
+LONG because it is *not* interruptible. Arm needed an entire new exception class for MOPS solely because
+half-done copy state is not portable between PEs, and ships **no interrupt-latency bound**. RISC-V has
+ratified **no** unbounded-length memory instruction.
+
+**Why option (c) is rejected by its own only shipping precedent.** z/Architecture's key-crossing moves are
+per-invocation copy authority validated against a revocable key mask -- exactly (c)'s structure, in silicon
+since S/370 -- and they demonstrate its flaw: MVCOS lets problem-state code fetch under another key into
+storage it owns and then read the result. **Authority-to-move is authority-to-read.** Every proposal this
+round that let software name the destination frame died on precisely this, in four independent attacks.
+
+**What IS ratified as hardware:** only the COW fault's own eligibility predicate -- who is entitled to cause
+a split. That is where a real security problem remains and where hardware is the right answer.
+
+**Recorded but NOT ratified:** if a hardware copy is ever built, its shape is settled -- a bounded **fixed
+32-byte granule** (simultaneously the widest existing single transaction in both layers and exactly the tag
+granule, so one step carries exactly one tag and the multi-granule interaction is avoided rather than
+tested), software loop, cursor in an ordinary GPR, per-step re-validation from the live ODT, destination
+unbindable until the last granule lands, and **no software-nameable source and no software-nameable
+destination frame** -- both from a hardware-written fault record. It is not built now because after
+correction 1 it buys no security property that `fork()` needs, and the hardware-first rule is conditional on
+there being a security problem for hardware to solve.
+
+**Prerequisite filed separately and independent of all of this: copy-on-write is BYPASSABLE in the shipped
+default.** `ext_reset` sets `veda_mode = zeros()`, so purecap is OFF, and ordinary base-ISA `ld`/`sd` never
+consult `entry.cow`. A plain `sd` to a `CGetBase`-derived address defeats COW entirely, and a trap handler
+runs with unbounded PCC by design. **COW is advisory until this is closed, and no copier decision changes
+that.** See also R22, which is the same disclosure surface seen from the other side.
+
 ### R20. WITHDRAWN before it was acted on -- "the memory-tier timing leaks physical addresses"
 
 **Status: NOT A FINDING. Recorded because the refutation is more useful than the claim was.**

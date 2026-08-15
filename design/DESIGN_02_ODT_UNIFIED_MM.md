@@ -211,9 +211,17 @@ COW built entirely from existing trap + Populate + Rebind + the new `cow` bit.
 
 ## Mechanism 3 -- the MSA becomes the pager/fault engine
 
-The MSA request/result model (verified, deliberately simple) already sits between the
+**[CORRECTED 2026-08-15, R19] The two sentences that followed here asserted that an MSA sits
+between core and memory and that the M24 DRAM-stall FSM is the seed of a multi-cycle fault
+path. BOTH ARE FALSE and were relied on to price a hardware copy instruction. There is no MSA
+in either layer -- one prose comment in Sail, zero occurrences in veda_core.tlv; the core
+indexes elfmem[] directly with combinational reads and always_ff writes. The M24 FSM freezes
+$pc and injects NOPs; it carries no address, no counter and no write-enable, and cannot be
+extended into a copy engine. Struck rather than deleted so the error stays visible.**
+
+~~The MSA request/result model (verified, deliberately simple) already sits between the
 core and memory. Residency faults and COW faults are new MSA-mediated events. The M24
-DRAM-stall FSM is the seed of the multi-cycle fault path. The EMERGENCY_HANDLING design
+DRAM-stall FSM is the seed of the multi-cycle fault path.~~ The EMERGENCY_HANDLING design
 (fresh minimal capability context for handlers) is exactly the right entry model for
 fault handlers.
 
