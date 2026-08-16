@@ -693,6 +693,107 @@ looked broken. Caught by running the simulator under an instruction trace rather
 test was wrong. Restore-then-rebuild, always -- the same contaminated-sweep class already recorded
 for the RTL.
 
+### The audit: a differential harness, a mutation census, and what they found
+
+**Status: harness and census BUILT. First work item (temporal safety) CLOSED on both layers.
+Sail 95/95, RTL 83/83. Census 22 survivors -> 16.**
+
+Three separate things get called "audit" and they have different readiness conditions. An
+implementation audit was the least valuable -- four had just been done on the same warm surface. A
+design audit would have spent its budget rediscovering already-recorded open questions, since three
+of five pillars are already documented as not-what-the-docs-claim. **The one that was ready, and by
+far the most valuable, was a COVERAGE audit: does the verification actually verify?** The evidence
+for that was not opinion -- it was four independent facts from this session's own work: the
+copy-on-write gate mutant survived a 94-test corpus; no test in either layer made an access fail two
+checks at once; R15 and R23a were paths with no check at all; and both "COW repair" tests repair by
+clearing the bit and copying nothing.
+
+#### The cross-layer differential harness
+
+Sail and the RTL are **two independent implementations of one specification**, so any behavioural
+difference is a bug in one of them -- and **nothing compared them**. The two corpora are not even the
+same programs. Three RTL-only defects in this project were found by a human reading code and none by
+a test.
+
+`veda-core/difftest` closes that. One probe, both layers, compared byte for byte through the
+**official RISC-V arch-test signature mechanism**. It asserts nothing; divergence is the finding.
+
+On its first real run it found `veda.rebind` behaving differently on a never-bound register.
+
+#### R24 -- my proposed fix was REFUTED, and the real defect is larger
+
+I proposed requiring `veda.rebind` to refuse unless its destination is TAGGED, on four grounds.
+**All four fell, and the decisive one is that the fix does not deliver its own primary purpose:**
+c11 and c12 are seeded TAGGED on *both* layers, so both would pass the new check and then diverge
+anyway on otype. It converts a 13-register divergence into a 2-register divergence of identical
+shape -- a narrower accident, not agreement by decision. Ground (2) and ground (4) also contradict
+each other: if the preserved Offset is garbage worth refusing, the encodings are not redundant; if
+they are redundant, nothing garbage is carried. And ground (3) is self-refuting -- a check that tests
+"tagged" cannot be the fail-closed guard for state that is *undefined*, since four to five registers
+come out of reset tagged and holding fixture contents.
+
+**It was never a rebind problem.** `cgettype x3, c0` on a reset machine returns 0x0000 on Sail and
+0xFFFF on the RTL -- one instruction, no rebind, and the query family is deliberately ungated.
+
+A probe measuring all 16 registers x 6 queries as the first instructions after reset found
+**16 of 16 capability registers diverge**: c0-c9 and c15 on otype alone, c10-c14 on tag, otype,
+perms, base and length. Sail's reset otype of 0x0000 sits inside the sealable range CSeal mints
+from, so **every unwritten Sail register is indistinguishable from one deliberately sealed with type
+zero**, while the RTL's own comment states "0xFFFF (the default) means UNSEALED".
+
+The codebase already learned this exact lesson and failed to generalise it: `step_ext.sail` records
+that leaving `veda_pcc_length` at Sail's default zero-initialisation would hard-trap on cycle one and
+calls a defined reset *"a real correctness requirement, not defensive styling"*. Every Veda register
+got that treatment in `ext_reset()`. **The capability register file is the only one that did not.**
+
+Not fixed in this increment, deliberately: the reset seeds are scaffolding for states unreachable
+through the ISA by design (the R10 region-crossing fixtures, the DESIGN_02 residency fixture).
+Deleting them naively deletes the `rt_valid` negative test and the dereference-side residency test.
+They must MOVE to a layer-parallel injection, and that is its own increment with real coverage risk.
+
+#### The mutation census -- 22 of 54 checks were unverified
+
+Every dereference path decides two things: whether a trap fires (the `*_violation` OR-expression) and
+which number a handler reads (the `*_cause` chain). The cause chain is only consulted when the
+violation fires, so **the violation expression is the enforcement layer**. Removing one term at a
+time from all seven of them -- 54 mutants, full suite each -- produced **22 survivors**: checks
+present and correct today that nothing would notice being deleted tomorrow.
+
+Three shapes, none of them a coincidence:
+
+1. **The two most security-critical checks were the least verified.** `$veda_gen_stale` and
+   `$veda_sealed` each survived on **six of seven** chains.
+2. **Coverage falls off as the path gets less ordinary** -- 1/6 unverified on plain load, rising to
+   5/9 on NMC_ADD.W. Precisely the paths where R15 and R23a were found.
+3. **One of my own tests passed for the right reason on one axis and the wrong one on another.**
+   `veda_smoke_check_order.S` P3/P4/P5 drive the NMC and atomic chains through a Length-0 capability
+   and assert BOUNDS, yet the bounds term survives its mutant on all three -- because the object is
+   *also* copy-on-write, so cow fires the trap and the cause chain still reports 0x01. Those phases
+   verify the cause ORDER and not the trap DECISION. **A hand-written test could not have found that.**
+
+#### Temporal safety closed -- the first work item, both layers
+
+`$veda_gen_stale` **is** the use-after-free defence. Delete it on six of seven paths and a stale
+capability reads and writes freed memory with no trap, and every one of 82 tests stays green.
+
+The construction is the whole point. The check is `(!valid) | (generation mismatch)`, so merely
+destroying an object proves only the validity half -- which any validity check would also catch. The
+half that matters is the other one, so `vc_uaf.S` / `veda_smoke_uaf.S` **destroy and then RE-POPULATE
+the same slot**. Afterwards the stale capability is tagged, unsealed, permitted, in bounds and
+resident; **only the generation differs**, so nothing else can refuse it. That is the real shape of
+use-after-free: the object is freed, **the slot is reused**, and an old pointer must not reach the new
+occupant. A control phase proves a fresh bind to the same object still works, so the refusal is the
+generation and not the object.
+
+Object 20 is minted fresh rather than reusing a fixture, because the difftest had just shown all 16
+capability registers diverge at reset -- a temporal-safety test built on a fixture would inherit that.
+
+**No model or RTL change was needed. The checks were already correct; they were unverified.**
+
+Verification: six RTL mutants (one per chain) now all killed by this test, census 22 -> 16. Two Sail
+mutants killed. The Sail NMC mutant was killed by **this test alone**, so that path's generation
+check was unverified on the Sail side too. Pristine restored and rebuilt on both layers.
+
 ### R20. WITHDRAWN before it was acted on -- "the memory-tier timing leaks physical addresses"
 
 **Status: NOT A FINDING. Recorded because the refutation is more useful than the claim was.**
