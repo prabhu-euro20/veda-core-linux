@@ -617,6 +617,82 @@ cow object and inspects the resulting Perms. **Both tests are owed and are track
 distinction explicitly because the same sentence -- "the suite is green" -- has already been shown
 twice in this document to mean far less than it appears to.
 
+### R19 increment 1 -- every refusal now precedes every repair, on both layers
+
+**Status: DONE. Sail 94/94, RTL 82/82, seven mutants killed with per-phase attribution.**
+
+**The rule, stated once and applied everywhere.** A cause chain has two classes of arm.
+*Refusals* (0x02 tag, 0x03 seal, 0x12/0x13 perms, 0x1f NMC, 0x08 alignment, 0x01 bounds) say
+"never allowed"; order among them is cosmetic. *Repairs* (0x0A residency, 0x0C copy-on-write) say
+"fix something and retry", and **each one arms real work in a handler** -- a page-in, or an
+allocate-copy-mint. Raising a repair for an access a refusal was going to reject anyway arms that
+work for nothing. **So every refusal precedes every repair.**
+
+That rule was already written down in this codebase, for residency, in its own words -- "raised only
+for an access that would otherwise have SUCCEEDED. That is an information-flow property." The cow
+arm violated it from the day it landed, sitting third in every chain.
+
+**0x0A precedes 0x0C**, because you cannot copy an object that is not in memory: the handler would
+dereference a Base whose frame the pager may already have reassigned.
+
+**The gate is what makes the move possible.** `veda_bind_perms` masks a cow object's Perms with
+`0xFFF7`, clearing PERM_STORE and leaving PERM_LOAD, so a freshly bound capability lacks store **by
+construction**. Moving cow below the permission arm without gating would make every fork-triggered
+write report "you may not write" instead of "copy me" -- copy-on-write would never fire at all. The
+permission arm is therefore gated on `not(entry.cow)`, and the old order's property is preserved
+exactly, by the gate rather than by precedence.
+
+**Corrections to the proposal, made before it was built.** The reorder was sent for adversarial
+review first, and three of its claims were wrong:
+
+- **"This closes rights amplification" is FALSE.** A principal that can trigger 0x0C out of bounds
+  can trigger it at offset 0 and get the same private copy. There is no rights delta. Ship this as
+  ordering hygiene and resource containment, never as closing amplification.
+- **The one genuine closure is a different one.** `veda_setbounds` with rs2 = 0 constructs a tagged,
+  generation-current capability of **Length 0 in one instruction**. Under the old order that
+  zero-entitlement capability stored, reached the cow arm before bounds was consulted, took 0x0C,
+  and a handler would have rebound it to a **full-Length** capability minted from the entry. Under
+  the new order every offset is out of bounds, so it can never arm a split.
+- **"Every capability to a cow object lacks store" is too strong.** The parent's pre-cow capability
+  retains it -- that is the fork case, and it is why the fault reads the ENTRY, not the capability.
+
+**Alignment had to be hoisted, and that was not in the proposal.** Sail's 32-byte alignment test
+lived in the OCL.C / OCS.C **callers**, after the checker returned Ok; the RTL's has always been an
+arm inside the chain. Moving cow last without hoisting would have made a misaligned store to a cow
+object report 0x0C in Sail and 0x08 in RTL -- a divergence created on a state where the layers agree
+today. Hoisting also closed two pre-existing divergences nobody had noticed (misaligned + out of
+bounds, and misaligned + non-resident).
+
+**0x0C is NOT the fallthrough.** The RTL default is deliberately hostile (`5'h02`) with every arm
+explicit. 0x0C is the only cause in the machine that instructs software to hand back a fresh
+writable object: a spurious 0x0A makes the pager refuse loudly, a spurious 0x0C **succeeds
+silently**. All seven chains now have one shape, diffable against Sail arm for arm.
+
+**Untouched on purpose:** the violation OR-expressions. They also feed R21's stall gate, and
+restructuring one is the single way this edit could reopen R21. The trap set is provably unchanged:
+`(cow) | (!STORE)` and `(!STORE & !cow) | (cow)` both reduce to `cow | !STORE`.
+
+**Why the corpus was blind to all of this.** No test in either layer made an access fail **more than
+one check at once**, so nothing could observe which cause won. That is the whole reason the defect
+survived. `vc_check_order.S` and `veda_smoke_check_order.S` are the first.
+
+**The mutant that survived, and what it exposed.** Removing the `not(entry.cow)` gate was caught by
+**nothing** in a 94-test Sail corpus. The existing copy-on-write tests inspect the attenuated
+capability with CGetPerm and **never dereference through it** -- attenuation tested as bookkeeping,
+never as enforcement, the identical shape as the CAndPerm defect. Phase D exists because that mutant
+lived, and it is the phase that now kills it.
+
+**Verification.** Sail: 3 mutants, 3 killed (whole reorder, the gate, cow-above-residency). RTL:
+7 mutants, 7 killed -- **one per cow-bearing chain, each breaking exactly one phase and no other**,
+which is what proves the edit reached all five rather than four. Pristine restored byte-identical
+and re-run on both layers.
+
+**One process failure worth recording.** After the first Sail mutation sweep the source was restored
+but the model was **not rebuilt**, so the next run measured a mutant's binary and a correct new test
+looked broken. Caught by running the simulator under an instruction trace rather than assuming the
+test was wrong. Restore-then-rebuild, always -- the same contaminated-sweep class already recorded
+for the RTL.
+
 ### R20. WITHDRAWN before it was acted on -- "the memory-tier timing leaks physical addresses"
 
 **Status: NOT A FINDING. Recorded because the refutation is more useful than the claim was.**
