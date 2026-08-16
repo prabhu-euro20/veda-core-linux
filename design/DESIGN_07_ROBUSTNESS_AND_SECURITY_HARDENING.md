@@ -568,6 +568,55 @@ consult `entry.cow`. A plain `sd` to a `CGetBase`-derived address defeats COW en
 runs with unbounded PCC by design. **COW is advisory until this is closed, and no copier decision changes
 that.** See also R22, which is the same disclosure surface seen from the other side.
 
+### R23. Two RTL-only defects found while grounding the R19 reorder -- one is an out-of-object write
+
+**Status: BOTH FIXED IN RTL. Neither is proven by the suite; their tests are owed.**
+
+Neither was the thing being looked for. Both surfaced because the R19 check-reorder was sent for
+adversarial review BEFORE implementation, and two independent lenses read the capability paths.
+
+**(a) The capability bounds check asked whether SIXTEEN bytes fit, for a THIRTY-TWO byte access.**
+
+`$veda_oclc_bounds_ok` used `65'd16`. The access is a whole 256-bit capability -- confirmed three
+independent ways: `$veda_ocsc_packed[255:0]` (:3215), `$veda_oclc_load_data[255:0]` (:4994, whose
+own comment reads *"a capability is 32 bytes now -- both arms read 32, not 16"*), and the elfmem
+store extent `+0..+31`. Sail has always passed `32` (`veda_ocl_insts.sail:188` and `:224`), so this
+was **RTL-only**.
+
+The hole, concretely: for an object of Length `L`, offset `L-16` satisfies `(L-16)+16 <= L`, so the
+check **passes** -- and the access then reads or writes through `Base+L+15`, **sixteen bytes past
+the object**, with a valid capability and no trap. That is a real out-of-object write primitive,
+not merely a mis-reported cause. Same class as R18's wrap, found the same way: by reading the width
+rather than trusting the check.
+
+It also made the R19 reorder's headline promise false. That reorder guarantees "an out-of-bounds
+store to a copy-on-write object reports 0x01 and never arms a copy" -- with this width, a store 16
+bytes past the object is not seen as out of bounds at all, falls through to the new bottom arm, and
+reports 0x0C. **Shipping the reorder first would have made its own guarantee false on two of seven
+chains, with no test to say so** -- the "applied to four of five arms" shape this record already
+names three times. Hence fixed FIRST, on its own.
+
+**(b) `veda.rebind` did not strip store permission from a copy-on-write object, three lines below
+the arm that does.**
+
+The Bind arm masks with `16'hFFF7` when the entry is cow. The Rebind arm, three lines below and
+directly under a comment stating *"a copy-on-write object never hands out store permission, however
+often it is bound"*, handed out `$veda_odt_perms` verbatim with no cow test. **The file contradicted
+its own written intent** -- the identical shape as the CAndPerm defect, where a derivation arm
+silently kept a right its neighbour strips. Sail masks both paths (`veda_bind_insts.sail:308` and
+`:341`). RTL-only divergence.
+
+Not a copy-on-write escape by itself -- `$veda_cow_write` reads the ENTRY, so a rebind-derived
+capability still traps 0x0C. But it makes R19's "the two bit patterns are indistinguishable"
+argument **Sail-only** today, which matters because that indistinguishability is the whole reason
+the eligibility predicate is open.
+
+**What 80/80 proves and does not.** The suite passes with both fixes. That proves **no regression**
+and nothing more: no existing test stores at offset `L-16` through a capability, and none rebinds a
+cow object and inspects the resulting Perms. **Both tests are owed and are tracked.** Recording this
+distinction explicitly because the same sentence -- "the suite is green" -- has already been shown
+twice in this document to mean far less than it appears to.
+
 ### R20. WITHDRAWN before it was acted on -- "the memory-tier timing leaks physical addresses"
 
 **Status: NOT A FINDING. Recorded because the refutation is more useful than the claim was.**
