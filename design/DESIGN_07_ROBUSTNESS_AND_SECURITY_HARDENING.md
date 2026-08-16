@@ -794,10 +794,53 @@ Verification: six RTL mutants (one per chain) now all killed by this test, censu
 mutants killed. The Sail NMC mutant was killed by **this test alone**, so that path's generation
 check was unverified on the Sail side too. Pristine restored and rebuilt on both layers.
 
+### R29. The RTL suite could not be rebuilt, and five tests were passing on images nobody could reproduce
+
+**Status: FIXED. 93 images now built from source on every run; RTL 87/87 with every one of them
+freshly assembled.**
+
+Found while wiring the R26 demonstrator in: `sim/*.hex` is gitignored (`.gitignore:38`) and
+**nothing in the repository rebuilt it.** The whole RTL suite ran only on a machine where those
+images happened to survive from a hand-typed `gcc` invocation -- one that reached into a DIFFERENT
+project's tree for its toolchain, `rva23-core/toolchain`, which is frozen and is not a dependency
+this line is entitled to have. On a fresh clone every `vvp` would have failed for want of an input
+the tree cannot produce. **For a security corpus, 87 tests nobody else can run is not far from not
+having them.**
+
+The runner now assembles every test from source before simulating, using the project's OWN toolchain,
+resolved exactly the way `sail_tests/run_veda_selfcheck_tests.sh` resolves it.
+
+**Building them for the first time immediately found three things, each measured rather than
+reasoned about, and the second and third are the interesting ones.**
+
+**The preprocessor is load-bearing, in both directions.** With cpp ON, three tests fail: prose in
+their headers parses as C -- an `# if Offset would land >= Length` read as a directive, and two
+headers naming `rtl/sim/*.S`, where `sim/*` opens a comment that never closes. The tempting fix is
+to turn cpp off. With cpp OFF, **41** tests fail, because the corpus writes its comments with `//`
+and only the preprocessor strips those. So cpp stays on and three comment lines were reworded. Had
+either setting been chosen by reasoning instead of by running both, the answer would have been wrong
+in one direction or the other.
+
+**And a linker script was sitting in the tree, referenced by nothing.** `sim/veda_smoke_test.ld`
+places `.data` immediately after `.text`. A bare `-Ttext=0x80000000` instead lets the linker
+page-align `.data`, landing it a full 0x1000 past the end of `.text`. **Five tests fail with that gap
+and pass without it** -- paging, scheduler, cross-thread and the two syscall0 tests, which are
+exactly the five in this corpus with a non-empty `.data`. Every other test has no `.data` at all,
+which is why the gap was invisible for as long as the images were never rebuilt.
+
+**The lesson is the same one the mutation census taught, arriving from the other side.** The census
+asked "is any test watching this check?" This asks the prior question: **is the artifact under test
+the one the source describes?** A green suite answers neither by itself. The census found 22 checks
+nobody was watching; this found five tests whose inputs could not be regenerated from the repository
+at all, and the correct build turned out to be recoverable only because someone had committed the
+linker script years-of-commits ago and then never referenced it.
+
 ### R26. Six security gates infer "not in a compartment" from a value software chooses
 
-**Status: THE ESCAPE IS REAL AND VERIFIED. The obvious fix is REFUTED by the corpus. One half
-shipped (a Sail/RTL divergence); the real fix is specified and NOT built.**
+**Status: CLOSED ON BOTH LAYERS AND DEMONSTRATED. The escape is real; the obvious fix is REFUTED
+by the corpus; the fix that shipped needed no new architectural state at all, because the state it
+needs was already there. Sail 98/98, RTL 87/87, and the demonstrator kills a mutant at every one of
+the six sites individually.**
 
 This began as a proposal to make purecap a one-way latch, because `veda_mode` is clear at reset and
 any code with unbounded PCC in Machine mode can clear it again -- and a trap handler has both by
@@ -845,9 +888,62 @@ set by OCInvoke, cleared by OCReturn and by the trap PCC reset, with the six gat
 instead of comparing a Length. Then the sentinel Length becomes an ordinary large number, the return
 path keeps working unchanged, and the forgery has nothing to forge.
 
-That is a real architectural increment with nesting and trap-interaction questions of its own
-(R12's depth counter and the mepcc save/restore are the adjacent machinery), and it is NOT built
-here. It is specified and tracked.
+**And then the increment turned out to be already built.** The specification above asks for a state
+set by OCInvoke, cleared by OCReturn and by the trap PCC reset. `veda_pcc_object` is exactly that
+state and has been since R11(b): OCInvoke sets it to the entered code object, OCReturn restores it,
+and trap entry clears it to `VEDA_OBJECT_NONE`. So no new register, no new nesting question, no new
+trap interaction -- **the six gates simply stop asking for the Length and ask for the name instead.**
+
+That substitution is what makes the forgery impossible rather than merely harder. A Length is a
+number Populate-Fast will write for anyone; `VEDA_OBJECT_NONE` is not a number software can arrive
+at, because it is not an object, and the only way to acquire a PCC bearing it is to not have crossed
+a boundary. **The predicate stopped being a comparison against a value and became a question about
+provenance.**
+
+Applied as an ADDED conjunct, never a substitution: the Length term stays. If some future path ever
+does narrow the PCC without setting an object, the old term still refuses. Six sites in Sail
+(`write_CSR` for 0x7C0, 0x7C1, 0x7C2, 0x7C3 and 0x7C5, plus mtvec in the access predicate) and one
+fused OR-list in the RTL, which carries all six CSRs in a single expression.
+
+**THE DEMONSTRATOR, which was owed and is now paid.** `vc_r26_authority_neg.S` and
+`veda_smoke_r26_authority.S` enter a real compartment on a code object whose Length IS the sentinel,
+then attempt the escape from inside.
+
+The construction rests on one property, and everything else in the test exists to protect it:
+**inside that compartment `veda_pcc_length` reads 0xFFFFFFFFFF -- byte-identical to its value at
+boot.** The length term therefore evaluates the SAME in both halves of the test and cannot be what
+refuses. Only the object differs: NONE outside, 30 inside. Both tests pin that equality explicitly,
+because without it a test would still pass if the compartment had merely narrowed its own bounds,
+which proves nothing about this finding at all.
+
+Two anti-vacuity pins, both earned rather than anticipated. The first draft of the RTL test FELL
+THROUGH: the OCInvoke trapped, the handler stepped over it, and execution reached the landing pad in
+a straight line having never entered a compartment -- where the saved-bounds CSR legitimately still
+holds the sentinel, so it would have reported PASS. Both tests now assert entry as a fact. And both
+assert that OUTSIDE, the very same write LANDS, so a CSR wired permanently shut could not pass either.
+
+Getting OCInvoke to succeed took reading `$veda_ocinvoke_violation` term by term rather than
+guessing at it, twice. It demands two capabilities, both tagged and sealed under the SAME otype,
+both carrying PERM_INVOKE, with EXECUTE on the code side and NOT on the data side. Passing one
+capability twice fails on the data-side EXECUTE term alone. And the seal authority needs a NON-ZERO
+Length, because CSeal requires `cs2.Offset < cs2.Length` -- an authority may only mint otypes inside
+its own range. That failure is quiet in an instructive way: CSeal writes every other field and takes
+only the TAG from the authorisation result, so an unauthorised seal yields a capability that looks
+correct in every field and is simply untagged.
+
+**Mutation results, which are the actual proof.** RTL: delete the single `pcc_object` comparator and
+the compartment rewrites its own execution bounds (`mepcc_length` becomes 0x40) and captures the trap
+vector (`mtvec` becomes the hijacked address). Sail: each of the six sites was reverted
+INDIVIDUALLY, with a full model rebuild per site, and **all six were killed -- and every one of them
+left the other 97 tests green.** Nothing else in either corpus was watching any of these gates.
+
+That last number is the more uncomfortable one. The three escape tests that already existed
+(`vc_pcc_csr_escape_neg.S`, `vc_pcc_csr_escape_mepcc_neg.S`, `vc_pcc_mtvec_escape_neg.S`) all build
+their code object with `Length = 0x0040`, a NARROW compartment, so the OLD length predicate alone
+refuses them and they pass unchanged on the unfixed model. They could not have been written any
+other way: they use the packed-descriptor form of Populate, whose Length field is 16 bits and cannot
+express a 40-bit sentinel. **The corpus had three tests aimed at this exact gate and none of them
+could see the hole, because the encoding they used could not reach it.**
 
 **What DID ship: the privilege half of the `veda_mode` write, which the RTL was missing.** Sail's
 `write_CSR(0x7C5)` requires `cur_privilege == Machine`; the RTL checked only the PCC-bounds half. So a
