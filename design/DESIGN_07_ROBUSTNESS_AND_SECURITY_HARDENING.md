@@ -794,6 +794,82 @@ Verification: six RTL mutants (one per chain) now all killed by this test, censu
 mutants killed. The Sail NMC mutant was killed by **this test alone**, so that path's generation
 check was unverified on the Sail side too. Pristine restored and rebuilt on both layers.
 
+### R26. Six security gates infer "not in a compartment" from a value software chooses
+
+**Status: THE ESCAPE IS REAL AND VERIFIED. The obvious fix is REFUTED by the corpus. One half
+shipped (a Sail/RTL divergence); the real fix is specified and NOT built.**
+
+This began as a proposal to make purecap a one-way latch, because `veda_mode` is clear at reset and
+any code with unbounded PCC in Machine mode can clear it again -- and a trap handler has both by
+construction. **The latch was rejected on two independent grounds, and the refutation found something
+much worse.**
+
+**Why the latch is dead.** `write_CSR(0x7C5)` gates SET and CLEAR on the *identical* expression, so
+there is no asymmetry to build a latch on. And the marginal authority it would deny is empty:
+`{can clear purecap}` is a strict subset of `{can mint a tagged capability over arbitrary physical
+memory}` via `POPULATE_FAST`, which needs only `Machine | ODA` and validates no Base. Worse, the door
+the latch closes is the only one that provably **cannot forge a capability** -- plain stores clear the
+granule tag -- while Populate-Fast plus Bind yields a *tagged* capability that is sealable, storable
+with its tag, and inheritable across OCInvoke. **It closes the visible door and leaves the laundering
+door open.** It is also not free: purecap is a total prohibition, not a check, and MMIO is reachable
+only through the ordinary path, so a latch thrown before the timer is armed is a permanent
+machine-wide denial of service in one instruction.
+
+**THE REAL FINDING.** `veda_pcc_length != VEDA_PCC_UNBOUNDED` is the second disjunct of the purecap
+hook -- and of five Veda CSR escape gates, the mtvec gate, fetch bounding, and the second arm of
+`veda_bind_domain_ok`. **Six independent security gates use "PCC Length is all-ones" as a proxy for
+"we are not inside a compartment".**
+
+That proxy is forgeable, and this codebase already wrote the collision down and never acted on it:
+*"an object may legitimately have Length == VEDA_PCC_UNBOUNDED ... the collision is reachable, not
+theoretical."* OCInvoke and OCReturn assign `veda_pcc_length = cs1.Length` verbatim, so entering a
+compartment on a sentinel-Length object makes all six gates read false at once. That compartment can
+then widen its own PCC through CSRs 0x7C0/0x7C1, **which carry no privilege gate at all**, forge
+mepcc, fetch anywhere, and use ordinary loads and stores freely. **Reachable at any privilege.**
+
+**AND THE OBVIOUS FIX IS WRONG.** Reserving the sentinel -- refusing `Length == 0xFFFFFFFFFF` at
+Populate-Fast, the only write path that can produce it -- was implemented, typechecked clean, and
+**broke 13 Sail tests and 6 RTL tests**. The reason is the finding underneath the finding:
+**22 Sail tests and 14 RTL tests construct exactly that object on purpose**, because *returning to
+unbounded PCC* requires a max-Length code object and OCReturn takes its bounds from the sentry's
+Length. DESIGN_01 already recorded this as a wart -- *"an awkward requirement for something as
+ordinary as leaving a compartment"* -- without connecting it to a security consequence.
+
+**The escape construction and the legitimate return path are the same object.** No refusal at the
+mint site can tell them apart, because there is nothing to tell apart.
+
+**What that means, and it is the whole lesson: a security state is being INFERRED from a data value
+rather than TRACKED.** "Am I in a compartment" is a property of the machine, not of a number the
+entered object happened to carry. The fix is to stop inferring -- an explicit in-compartment state
+set by OCInvoke, cleared by OCReturn and by the trap PCC reset, with the six gates reading that
+instead of comparing a Length. Then the sentinel Length becomes an ordinary large number, the return
+path keeps working unchanged, and the forgery has nothing to forge.
+
+That is a real architectural increment with nesting and trap-interaction questions of its own
+(R12's depth counter and the mepcc save/restore are the adjacent machinery), and it is NOT built
+here. It is specified and tracked.
+
+**What DID ship: the privilege half of the `veda_mode` write, which the RTL was missing.** Sail's
+`write_CSR(0x7C5)` requires `cur_privilege == Machine`; the RTL checked only the PCC-bounds half. So a
+post-`droppriv`, unbounded-PCC principal could clear purecap on hardware while being refused at
+Populate, which does carry the privilege term. One AND term, gating the write-enable rather than
+raising a violation, because Sail's non-Machine write is a silent no-op that neither traps nor
+writes. Sail 97/97, RTL 85/85.
+
+**On the reset default, which was the original question: it stays OFF, and now for a real reason
+rather than by accident.** It was never a decision -- the specification does not define CSR 0x7C5 at
+all, and the only recorded rationale was test-corpus compatibility. But four independent capability
+systems were checked and not one boots with enforcement on; all four start at maximal authority and
+narrow monotonically. Veda-Core's genuine outlier property is not the default: it is that there is no
+root-capability analogue, so "off" means *unchecked* rather than *checked against a root you still
+hold*. That gap deserves its own design pass. A sticky bit over a total prohibition was not the way in.
+
+**Also corrected, because it was load-bearing for the rejected proposal: the bootstrap justification
+is false.** `ext_reset()` seeds the ODT before the first instruction, and even from an empty ODT,
+Populate takes everything from GPRs and touches no memory, Bind reads no memory, and OCS.D writes
+through the capability path. **Object construction under purecap needs zero ordinary loads or
+stores.** The genuine bootstrap blocker is device MMIO, not object construction.
+
 ### R20. WITHDRAWN before it was acted on -- "the memory-tier timing leaks physical addresses"
 
 **Status: NOT A FINDING. Recorded because the refutation is more useful than the claim was.**
