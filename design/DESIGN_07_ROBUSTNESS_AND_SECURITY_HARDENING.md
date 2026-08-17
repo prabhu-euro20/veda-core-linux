@@ -811,7 +811,19 @@ Measured on BOTH layers and in agreement, so this documents architecture rather 
 | traps taken | **zero** |
 | *control:* the same write through the capability path | **traps** |
 
-**The scope is narrower than "purecap is off", and that is the useful part.**
+**THE SCOPE IS BIGGER THAN I FIRST RECORDED, and the correction came from the adversarial pass on my
+own entry.** I wrote that this is "precisely the unbounded boot context". It is not. `veda_pcc_save_and_reset()`
+(`veda_regs.sail:235-247`) sets `veda_pcc_length = VEDA_PCC_UNBOUNDED` and `veda_pcc_base = zeros()` on
+**every trap**, and a trap never touches `veda_mode` -- verified by grep, there is no assignment to it
+on any trap, save-and-reset or xret path. So with purecap off, **every trap handler re-enters the same
+unchecked ambient context as reset.** The window is reset PLUS every trap, not reset alone.
+
+That is not an escalation -- the handler at `mtvec` is trusted code, and `mtvec` is Machine-gated, so
+the ambient context is entered by the code reset already trusts, exactly as with the `Machine`
+disjunct. But it changes how *often* the unchecked path is live, and any future audit or provenance
+story has to account for a window that opens on every fault rather than once at boot.
+
+**The scope is still narrower than "purecap is off" in the other direction, and that part holds.**
 
     $veda_purecap_violation = ($is_load || $is_store) &&
                               ($veda_mode[0] || ($veda_pcc_length != UNBOUNDED))
@@ -888,6 +900,14 @@ that builds it. Blocking that would break the architecture's own way out.
 
 Measured before editing: **no test in the corpus writes 0x7C4 after `veda.droppriv`**, so the privilege
 half costs nothing.
+
+**A second correction to an earlier entry, from the same pass.** R27 added a `cur_privilege == Machine`
+test inside `write_CSR(0x7C0..0x7C3)` on the Sail layer. **That arm is inert.** `doCSR` calls
+`check_CSR_result` -> `check_CSR` -> `check_CSR_priv` *first* (`sys/sys_control.sail:38-41`, composed
+at `:54-59`), and `csrPriv` for those addresses is bits [9:8] = `0b11` = Machine, so `write_CSR` is
+unreachable at any lower privilege and the inner test can never be false. The behaviour is correct;
+the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
+also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
 ### R30. The RTL executes encodings the architecture never allocated
 
