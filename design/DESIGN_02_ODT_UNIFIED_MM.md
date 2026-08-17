@@ -202,12 +202,30 @@ identical path R15 found missing the store permission entirely one increment ear
 out would have made copy-on-write bypassable by the same route.
 
 `fork` (DESIGN_00: child = new domain) marks the parent's writable data objects `cow`
-in the ODT; parent and child both hold read-only-attenuated capabilities (CAndPerm,
-DESIGN_01) to the same Object_IDs. Read-only objects (text) are shared as-is. On the
+in the ODT; parent and child both hold capabilities to the same Object_IDs, **carrying
+their store permission unchanged**. Read-only objects (text) are shared as-is. On the
 first write to a `cow` object, hardware traps (reuse the existing store-side violation
 path); the handler mints a fresh Object_ID (ODT-Populate), copies contents, clears
 `cow`, and rebinds the writer. **No page copying, no eager duplication** -- object-level
 COW built entirely from existing trap + Populate + Rebind + the new `cow` bit.
+
+**CORRECTED BY R38 (DESIGN_07), AND THE STEP THAT WENT WAS ALWAYS REDUNDANT.** This
+paragraph used to say parent and child both hold *"read-only-attenuated capabilities
+(CAndPerm, DESIGN_01)"*. That `CAndPerm` step never did any work: what stops the write
+from landing on the shared object is the **entry's `cow` bit**, not the capability's
+permissions -- a store-carrying capability to a `cow` object takes the copy-on-write
+fault and never reaches memory. The attenuation was belt-and-braces.
+
+R38 made it actively wrong. The copy-on-write fault is a **repair request**, not a
+refusal: it instructs the handler to allocate, copy, and hand back a fresh *writable*
+object. Leaving it available to any holder of a read-only view meant anyone handed one
+could force an unbounded series of allocations while holding no write authority at all.
+The fault's eligibility predicate is now the capability's own `PERM_STORE`, so **the
+split right belongs to whoever held write authority at the moment the object became
+copy-on-write** -- which after this correction is exactly parent and child, and nobody
+who merely learns the Object_ID afterwards. Written as it was, the recipe would have
+produced `0x13 PERM_STORE` for both of them and `fork` could never have completed its
+first write.
 
 ## Mechanism 3 -- the MSA becomes the pager/fault engine
 

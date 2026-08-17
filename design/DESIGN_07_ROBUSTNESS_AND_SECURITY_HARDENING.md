@@ -909,6 +909,55 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R41. A Populate carried the previous occupant's policy, and the two layers disagreed about it
+
+**Status: FIXED AND VERIFIED. Sail 101/101, RTL 90/90, ACT4 51/51, differential 18/18. Found by the
+adversarial pass on R38 -- after R38 had already been committed.**
+
+| | Sail, before | RTL |
+|---|---|---|
+| `VEDA_ODT_POPULATE` `cow` | `old_entry.cow` (**carried**) | `<= 8'h00` (**cleared**) |
+| `VEDA_ODT_POPULATE` `owner_domain` | `old_entry.owner_domain` (**carried**) | `<= VEDA_DOMAIN_ANY` |
+| `VEDA_ODT_POPULATE_FAST` `cow` | `false` | `<= 8'h00` |
+| `VEDA_ODT_POPULATE_FAST` `owner_domain` | `VEDA_DOMAIN_ANY` | `<= VEDA_DOMAIN_ANY` |
+
+**The two Sail populate variants disagreed with each other on both policy fields, and plain Populate
+disagreed with the RTL on both.** The RTL had the reasoning written down -- *"Populate may reuse a slot
+whose previous object was copy-on-write -- without this, the new object would be born copy-on-write and
+its first write would fault for no reason"* -- and the `odt_entry` struct's own comment on
+`owner_domain` says `VEDA_DOMAIN_ANY` is *"how every object is created"*, which plain Populate made
+false. Sail's plain clause was the outlier on three independent counts at once.
+
+**R38 IS WHAT TURNED IT FROM A NUISANCE INTO A LOCKOUT.** While the cow arm ignored capability
+permissions, a stale `cow` only meant a spurious 0x0C a handler could clear. Now the split right
+belongs to whoever held PERM_STORE when the object became copy-on-write -- and **an object born
+copy-on-write has no such principal, ever.** Populate returns a status in `rd`, not a capability, so
+the minter must Bind, and Bind masks store off a cow entry. The freshly minted object was unwritable by
+anyone, from creation.
+
+**MEASURED BEFORE THE FIX, NOT ASSERTED.** `difftest/probes/p16_populate_policy_reset.S` was written
+first and run against the un-rebuilt model, capturing the divergence live:
+
+| word | Sail (pre-fix) | RTL | after |
+|---|---|---|---|
+| Perms after re-populate | **0x04** -- LOAD only | 0x0C | 0x0C on both |
+| traps after a store on the new object | **1** -- it faulted | 0 | 0 on both |
+| control: a real cow object still refuses | 0x53 | 0x53 | unchanged |
+
+**THE COVERAGE GAP IS THE REAL LESSON.** No probe in the suite composed Populate with `set.cow`, so a
+two-field divergence sat inside a differential harness reporting 16/16. A harness only compares the
+states its probes enter.
+
+**AND THE FORK RECIPE IN DESIGN_02 WAS DEAD AS WRITTEN, WHICH THE SAME PASS CAUGHT.** It said parent
+and child both hold *"read-only-attenuated capabilities (CAndPerm)"* and that the first write traps --
+which under R38 yields 0x13 for both of them, so `fork` could never complete its first write. The
+`CAndPerm` step never did any work in the first place: what stops the write landing on the shared
+object is the **entry's `cow` bit**, not the capability's permissions. DESIGN_02 is corrected: parent
+and child share their capabilities with store permission intact, which makes them exactly the
+principals R38 entitles. A redundant attenuation became a fatal one the moment the predicate started
+reading permissions -- the second time in this increment, after the RTL test's *"be explicit"*
+re-bind.
+
 ### R40. Four permission bits the specification declares Active are enforced by neither layer
 
 **Status: MEASURED ON BOTH LAYERS BY EXHAUSTIVE ENUMERATION, NOT SAMPLING. Recorded, not yet fixed --
@@ -1009,10 +1058,17 @@ split; whoever learns the Object_ID afterwards may read.** That is what copy-on-
 meant -- the copy is owed to the writers that existed at fork, not to anyone who later learns the name.
 
 **AND IT IS NON-ADVISORY PRECISELY BECAUSE THE BIND-TIME MASK STAYS.** The 0xFFF7 mask is the one
-attenuation a re-Bind cannot escape. Until now that mask did **no enforcement work at all**: the cow
-arm caught every write regardless of Perms, so the mask's only observable effect was the value
-`CGetPerm` returned. This change is what finally gives it something to enforce -- an inert mechanism
-activated rather than a new one added.
+attenuation a re-Bind cannot escape, and this change is what gives it something to enforce **during
+the cow window** -- an inert-where-it-mattered mechanism activated rather than a new one added.
+
+**A CORRECTION TO MY OWN CLAIM, KEPT BECAUSE OF HOW IT HAPPENED.** I first wrote that the mask "did no
+enforcement work at all", and put that sentence in the Sail source, the RTL source, this document and
+the commit message. It is overstated. The old arm read `... & not(entry.cow)`, so the mask was inert
+only *while* cow was set; the moment cow was cleared the same arm refused a store-stripped capability
+with 0x13, and every object that completed a repair was enforced by it. **Two independent readers gave
+me opposite answers on exactly this point and I took the wrong one without checking** -- the failure
+mode this record keeps warning about, committed while writing the entry that warns about it. Corrected
+in all four places.
 
 **WHAT IT DELIBERATELY CANNOT EXPRESS, and why that is not a loss.** "Read-only but splittable" is
 now inexpressible: if an entry's Perms lack PERM_STORE, no capability to it may ever force a copy. A
