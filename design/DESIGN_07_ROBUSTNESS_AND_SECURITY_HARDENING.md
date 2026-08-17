@@ -794,6 +794,125 @@ Verification: six RTL mutants (one per chain) now all killed by this test, censu
 mutants killed. The Sail NMC mutant was killed by **this test alone**, so that path's generation
 check was unverified on the Sail side too. Pristine restored and rebuilt on both layers.
 
+### R30. The RTL silently executes nothing for undefined encodings in its own opcode space
+
+**Status: REAL, REPRODUCED, NOT FIXED. Recorded with its reproducer; the fix is a decode-completeness
+sweep and belongs in its own increment.**
+
+Custom-0 with funct3 = 000 defines exactly three encodings -- 0000011 Populate, 0000100
+Populate-Fast, 0000101 page-in. Issue funct7 = 0001010 in that space and **Sail raises
+Illegal_Instruction; the RTL retires it as a no-op.** `$veda_illegal_instr` is a list of specific
+named refusals with no catch-all arm for an unrecognised encoding.
+
+**A core that silently ignores instructions it does not know is a NOP sled through everything the
+model refuses.** It also breaks the fail-closed principle this document has applied everywhere else:
+every other unknown or unauthorised thing in this design traps.
+
+**How it was found is the part worth keeping.** Nobody looked for it. `difftest/probes/p2_derive.S`
+meant to exercise OCA and typed the wrong major opcode -- OCA is custom-2/funct3=001, the probe wrote
+custom-0/funct3=000. The typo produced an undefined instruction, the two layers disagreed about it,
+and the disagreement sat unread for the reasons in the next finding.
+
+### R31. The differential harness could not fail, nobody ran it, and it compared padding
+
+**Status: FIXED. The suite now fails, is runnable, and pins every known divergence.**
+
+The cross-layer harness built during the audit was the project's only mechanical check that its two
+implementations agree. Four defects, each of which alone made it decorative:
+
+1. **It could not fail.** `set -uo pipefail` with no `-e`, and both the AGREE and DIVERGE branches
+   ended in an `echo`. Measured: it returned **exit 0 on a divergence it had just printed in full**.
+2. **Nothing invoked it.** Its entire caller was one line in a README.
+3. **It compared padding.** It diffed a fixed `head -192` of each signature, but Sail emits exactly
+   the words between `begin_signature` and `end_signature` -- 16 for most probes -- while the RTL
+   testbench always dumps its full 192-word window. So 176 words of Sail EOF were compared against
+   176 words of RTL `x`, and **every probe reported DIVERGE**. That is exactly as useless as every
+   probe reporting AGREE, and it drowned two real divergences in noise.
+4. **It measured two different vintages.** It consumed `rtl/sim/veda_core.sv`, which is SandPiper
+   output that only `run_veda_smoke_test.sh` regenerates. Land a change in `veda_core.tlv`, skip the
+   smoke script, and the harness compares a current Sail model against RTL of unknown age --
+   inventing divergences that are history rather than defects. **This one was found in a fix I had
+   just made an hour earlier**: I made it rebuild `sim_diff.vvp` from `veda_core.sv` every run and
+   wrote in the comment that this killed the staleness class. It moved the staleness up one level.
+
+Fixed: exit code is the verdict (0 agree, 1 diverge, 2 infrastructure); comparison length comes from
+the Sail signature, which is derived from the real linker symbols; the harness refuses to run when
+`veda_core.tlv` is newer than the transpiled `veda_core.sv`; and `run_difftests.sh` runs every probe
+against a **recorded expected verdict**.
+
+**Expected-DIVERGE is deliberate, and it matters.** Hiding a real divergence behind an
+all-must-agree suite would repeat the mistake this document keeps finding. Three probes are recorded
+as DIVERGE with their reasons, and a fingerprint of the divergence is pinned, so **either direction
+now fails**: an expected-AGREE probe that diverges, an expected-DIVERGE probe that agrees (the open
+item closed -- update the table), or one that diverges *differently*.
+
+With the padding removed, the two real divergences it had been hiding are R30 above and the c11
+fixture, which is R24's open half seen through a second probe.
+
+### R24. The capability register file had no architectural reset state
+
+**Status: THE HALF THAT IS ARCHITECTURE IS CLOSED AND DEMONSTRATED. The half that is test
+scaffolding is scoped, its dependencies are mapped test-by-test, and it is NOT built.**
+
+**It was never a rebind problem.** The original proposal -- require `veda.rebind` to refuse an
+untagged destination -- was refuted here already. `cgettype c0` on a reset machine returned 0x0000 on
+Sail and 0xFFFF on the RTL: one instruction, no rebind.
+
+**The defect is that zero is a legitimate seal type.** `isSealedCap` is `otype != UNSEALED_OTYPE`
+with `UNSEALED_OTYPE = 0xFFFF`, so every untouched Sail register read as **sealed with type zero** --
+a type CSeal really can mint, since the otype it produces is just the sealing authority's Offset.
+An unwritten register was indistinguishable from one a program had deliberately sealed.
+
+**And one enforcement decision reads sealedness with no tag conjunct.** Rebind soft-fails on
+`isSealedCap(destination)` alone. So `rebind` into a never-written register silently refused on Sail
+and succeeded on the RTL. Same rule on both layers -- `$veda_rebind_sealed` is likewise
+`otype != 16'hFFFF` with no tag term. **Only the reset value differed, and it changed what the
+instruction did.**
+
+The RTL is correct and Sail moved. `ext_reset()` now calls `veda_reset_crf()` before the seeding.
+The value it writes is `zero_capability` from `veda_types.sail` -- every field zero, otype =
+UNSEALED_OTYPE -- **a constant that already existed and had no callers.** The right answer had been
+written down and never applied.
+
+Verification: `vc_r24_crf_reset.S` / `veda_smoke_r24_crf_reset.S` pin the reset value directly, then
+prove the consequence, with a control that seals a register for real and shows rebind onto it still
+soft-fails. Sail mutant (remove the call): 98/99, this test alone dies. RTL mutant (reset otype
+0xFFFF -> 0x0000): reproduces the Sail bug exactly. **Cross-layer divergence 16/16 -> 5/16.**
+
+**THE OPEN HALF, and its dependencies are now mapped rather than guessed.** The five remaining
+registers are the slots where BOTH layers seed test fixtures inside the architectural reset, at
+different indices with different contents. A mechanical operand-role scan -- every `encdec` clause
+parsed, then all 890 `.insn r` and 251 `.insn i` lines in both corpora resolved to cap-read /
+cap-write / GPR -- found exactly nine cold readers:
+
+| reg | consumer | what the fixture buys |
+|-----|----------|----------------------|
+| c10, c11 | `vc_r10_ocinvoke_region_fault_neg.S` | sealed region-2 code+data, built to pass all nine OCInvoke checks so the region gate is the FIRST failure. Without them the trap is TAG_VIOLATION and the R10 call-side closure loses its only test. |
+| c12 | `vc_residency_deref_neg.S`, `vc_check_order.S` phase B | the only test of the DEREFERENCE-side residency gate; the other residency tests fault at Bind and never reach a dereference. Pairs with ODT entry 600. |
+| c13 | `vc_r10_ocreturn_region_fault_neg.S` | region-2 sentry, the RETURN half of the R10 closure. |
+| c14 | `vc_r10_rt_valid_gate_neg.S` | region-3 sentry plus a deliberately contradictory table slot (`rt_valid = false, resident = TRUE`). **`rt_valid` has exactly one consumer in the whole model and this is it** -- drop the fail-closed conjunct anywhere else and nothing notices. |
+
+Plus three RTL cold readers and one difftest probe.
+
+**The decision, taken from three independently-designed options and then attacked from three angles.**
+Ranked: gate the fixtures behind an explicit layer-parallel test-only switch that is OFF by default,
+so the architectural reset is clean and identical and the differential harness measures architecture
+rather than scaffolding. Making the fixture states reachable through a new instruction was **rejected
+by its own author**: the states are unreachable by design, and a mechanism to construct them is a
+mechanism to construct the attack the defence exists for. Making the two layers byte-identical while
+leaving the fixtures in reset ranked last -- it buys byte-identity without architectural identity,
+and makes reset hand the running program five TAGGED capabilities, two carrying Execute|Invoke, as a
+normative claim. **On a machine whose thesis is that authority is derived, reset-with-authority is
+the one state where nothing derived it.**
+
+**Two of the three adversarial lenses landed, and neither hit the reset fix.** The security lens
+confirmed the flag itself is strictly authority-reducing and could build no attack on it -- but broke
+a region-pager idea that had been bundled in, on the ground that `veda_crbr_restore_on_xret` is
+infallible *because* "the Region Table is immutable after reset (no RT-write instruction exists)".
+The drift lens broke the winner's policing story, and it was right: the harness that was supposed to
+police the two switches was R31 above. **The anti-drift mechanism has to exist before the thing it
+polices ships**, which is why R31 was fixed first and the flag is not built yet.
+
 ### R29. The RTL suite could not be rebuilt, and five tests were passing on images nobody could reproduce
 
 **Status: FIXED. 93 images now built from source on every run; RTL 87/87 with every one of them
