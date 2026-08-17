@@ -794,19 +794,109 @@ Verification: six RTL mutants (one per chain) now all killed by this test, censu
 mutants killed. The Sail NMC mutant was killed by **this test alone**, so that path's generation
 check was unverified on the Sail side too. Pristine restored and rebuilt on both layers.
 
-### R30. The RTL silently executes nothing for undefined encodings in its own opcode space
+### R30. The RTL executes encodings the architecture never allocated
 
-**Status: REAL, REPRODUCED, NOT FIXED. Recorded with its reproducer; the fix is a decode-completeness
-sweep and belongs in its own increment.**
+**Status: REAL, MEASURED ON BOTH LAYERS, NOT FIXED. Design chosen and then ATTACKED, and all three
+adversarial lenses landed -- one of them on my own security framing, which was overstated and is
+corrected below.**
 
 Custom-0 with funct3 = 000 defines exactly three encodings -- 0000011 Populate, 0000100
 Populate-Fast, 0000101 page-in. Issue funct7 = 0001010 in that space and **Sail raises
 Illegal_Instruction; the RTL retires it as a no-op.** `$veda_illegal_instr` is a list of specific
 named refusals with no catch-all arm for an unrecognised encoding.
 
-**A core that silently ignores instructions it does not know is a NOP sled through everything the
-model refuses.** It also breaks the fail-closed principle this document has applied everywhere else:
-every other unknown or unauthorised thing in this design traps.
+**GROUNDED IN THE OFFICIAL UPSTREAM MODEL, read in full.** `model/sys/insts_begin.sail` declares
+`ILLEGAL : word` and its own comment states the rule: *"the encdec mapping must come last to ensure
+that all unmatched encodings decode to an illegal instruction."* The wildcard clause lives in
+`postlude/insts_end.sail`. **Sail is fail-closed by construction. The RTL has no such mechanism at
+all** -- `$veda_illegal_instr` is a list of seven named refusals and is the file's only
+illegal-instruction source.
+
+**THE SPACE IS BIGGER THAN THE FINDING SAID, in three ways, and the enumeration was mechanical.**
+
+*Veda claims FOUR major opcodes in the RTL, not two*: custom-0 0x0b, custom-1 0x2b (ATOMIC),
+custom-2 0x5b, custom-3 0x7b (DropPriv). Sail knows only three -- there is no custom-3 clause
+anywhere in the model. A catch-all covering 0x0b/0x5b leaves two whole opcodes open.
+
+*There are TWO classes, and the second one is worse.* Class 1 is fail-open **silent**: nothing
+decodes, the instruction retires as a no-op. Class 2 is fail-open **active**: the RTL decodes an
+encoding the architecture never allocated and executes it **as a defined instruction**, because
+three decoders are over-broad --
+
+| decoder | what it fails to test | consequence, measured |
+|---|---|---|
+| `$is_veda_bind` (`:1351`) | `imm[11:2]`, which Sail pins to zero | 1023 of 1024 patterns Sail refuses **mint a capability here** |
+| `$is_veda_ospecialrw` selector (`:3747`) | gates the ODA write on `!is_tsc && !is_ssc` | 29 selectors Sail refuses perform the **ODA swap** |
+| `$is_veda_droppriv` (`:1658`) | `funct3` entirely | all 8 values clear `$priv` |
+
+*And the base ISA is fail-open too.* Measured by running the hardware, not by reading it:
+**`mul x3, x1, x2` with 3 and 4 retires `x3 = 0` and takes no trap; `ebreak` does nothing.** The
+whole M extension is a silent no-op. The base decode is a flat list of positive AND-terms with no
+default arm.
+
+**MY SECURITY FRAMING WAS WRONG, AND THE ADVERSARIAL PASS IS WHAT CAUGHT IT.** I justified this as
+*"attenuate then delegate under forward incompatibility"* -- a binary built for a machine with
+attenuation instruction X, run on a machine without it, silently delegating full authority. **That
+scenario cannot fire on this machine.** Every attenuation instruction Veda has is decoded AND
+enforced in the RTL: CAndPerm (`:1564`, gate `:3281`), CSetBounds/Exact (`:1618-1619`, gate `:3318`),
+OCA -- with `vc_candperm_enforce_neg.S` and `veda_smoke_perm_enforce_neg.S` proving the enforcement
+rather than the bookkeeping. And there is no sub-extension granularity to create a mixed deployment:
+`currentlyEnabled(Ext_Veda)` is one boolean with no misa bit and no version CSR. The scenario needs a
+Veda v2 that does not exist.
+
+**Worse for my framing: not one of the fail-open encodings grants authority the executing code did
+not already have.** Checked one at a time. The Bind hole executes as a Bind the same code could have
+issued legally with `imm = 0`. The OSpecialRW hole reaches the ODA -- which selector `00000` reaches
+legally, from the same privilege level, so my "the one that today reaches a privileged register" was
+false as stated. The AMO hole is gated by the FULL dereference check set and zeroes eight bytes
+inside a window the holder already has store permission for -- an integrity divergence, not an
+escalation. Bind mode 11 is a no-op, and a no-op confers nothing.
+
+**THE HONEST JUSTIFICATION, which is weaker and still sufficient.** R30 is a systematic Sail/RTL
+divergence and a violation of the fail-closed principle this design applies everywhere else. It is
+not an exploit today. It is worth closing because **fail-open is what hides bugs**, and this project
+has the receipt: `difftest/probes/p2_derive.S` records a draft that used the wrong funct3 for
+CAndPerm, "which decodes as nothing -- and the probe still reported AGREE, because BOTH layers did
+the same no-op." A machine that traps on the unallocated makes a forgotten decode **loud on its
+first simulation**. That is the only direction a capability machine may fail in, and it is what makes
+every future extension safe rather than this one.
+
+**THE DESIGN, and the blast radius is known before the first edit.** `$veda_undef_encoding =
+$veda_op_claimed && !$veda_decoded`, joining `$veda_illegal_instr` -- which already supplies
+mcause 0x02 and `mtval` = the raw faulting word, exactly what a diagnosing handler needs. It must be
+wired into **both** `$veda_trap_taken` (`:4183`) and `$veda_illegal_instr` (`:4251`); they are
+separate lists, and adding to one alone gives either a trap with the wrong cause or a cause with no
+trap. `$veda_decoded` must list TERMINAL signals, never umbrellas -- listing `$is_veda_bind` instead
+of its three mode terminals is exactly how the Class 2 holes arose.
+
+**One existing test locks the defect in.** `rtl/sim/veda_smoke_m8_neg.S:68` executes `veda.bind`
+mode 11 and its own comment asserts it "must be a complete no-op", with the testbench checking the
+destination is unchanged. And it never installs `mtvec`, which resets to 0 -- so the new trap sends
+the PC to 0, `elfmem` is declared `[0x8000_0000 : 0x8007_FFFF]`, the fetch indexes outside it, and
+Icarus returns X. **The failure would present as the whole register file going X**, the same
+confusing shape that cost real debugging time on the paging test earlier in this session. That test
+moves in the same increment, and it needs a handler.
+
+### R32. The CSR address space is a second fail-open surface, and the encoding catch-all cannot reach it
+
+**Status: REAL, MEASURED. Found by the adversarial pass on R30's own fix.**
+
+Sail is fail-closed for CSR addresses by exactly the construction it uses for encodings:
+`postlude/csr_end.sail:11` is a last wildcard `is_CSR_accessible(_) = false`, and `veda_regs.sail`
+declares accessibility for 0x7C0..0x7C8 only. **The RTL has no address-validity term anywhere** --
+`$csr_rdata`'s default arm is `64'b0`, and neither `$veda_illegal_instr` nor `$veda_trap_taken`
+carries an unknown-CSR term.
+
+Measured (`difftest/probes/p7_csr_space.S`): `csrrw x1, 0x7C9, x2` traps on Sail and **reads ZERO**
+on the RTL, silently. A control read of the defined 0x7C1 returns the same value on both, so this is
+not a layer refusing everything.
+
+**Zero is worse than a no-op**, because zero is a value software can act on. A handler probing for a
+feature by reading its CSR concludes the feature is present and disabled, rather than absent.
+
+**An opcode-keyed catch-all cannot close it**: a CSR access is opcode `1110011`, not one of the four
+custom opcodes, so `$veda_op_claimed` is false and behaviour is bit-identical before and after the
+R30 fix. **Two fail-open surfaces, two separate fixes.**
 
 **How it was found is the part worth keeping.** Nobody looked for it. `difftest/probes/p2_derive.S`
 meant to exercise OCA and typed the wrong major opcode -- OCA is custom-2/funct3=001, the probe wrote
