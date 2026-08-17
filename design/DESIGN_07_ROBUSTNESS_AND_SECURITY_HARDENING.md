@@ -909,6 +909,61 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R36. Twenty-three security gates rest on a privilege bit the specification does not define
+
+**Status: MEASURED AND PINNED. Not fixed -- the fix is a specification decision, and the two candidate
+answers are opposite. Recorded with its test so the divergence cannot drift while it is decided.**
+
+Found while asking a narrower question: why can the differential harness not compare privileged
+behaviour? Because the two layers do not share a privilege mechanism -- and the reason is worse than
+a mechanism difference.
+
+| | Sail | RTL |
+|---|---|---|
+| how privilege drops | `mstatus.MPP` + `mret`, standard RISC-V | `veda.droppriv`, custom-3, **one way** |
+| how a trap affects it | **raises to Machine** | **nothing -- the mux has no trap arm** |
+| how `mret` affects it | restores from `MPP` | **nothing -- no mret arm either** |
+| is the instruction specified? | **`droppriv` and custom-3 appear ZERO times in the whole model** | 3 sites |
+
+`$priv` has exactly one writer in the RTL:
+
+    $priv = $reset ? 1'b1 : (>>1$is_veda_droppriv ? 1'b0 : >>1$priv);
+
+Set at reset, cleared once, **never restored by anything**. And **23 consumers gate on it** --
+including R27's four CSR arms and the R35 `veda_attr` term shipped this same session.
+
+**So the privilege half of this layer's security rests on a bit whose only writer is an instruction
+the specification does not define, and whose value no trap can restore.** That is not a verification
+gap with a security consequence attached; it is the other way round.
+
+**Measured, not argued** (`veda_smoke_r36_priv_trap.S`): after `veda.droppriv`, a Populate is refused,
+the trap handler entered on that refusal is **still unprivileged**, and a privileged CSR write from
+inside the handler does not land. `$priv` reads 0 at the end. **A handler entered after a single drop
+cannot perform any of the 23 privileged operations** -- it cannot install a trap vector, use
+OSpecialRW, stage `veda_attr`, or Populate. On Sail the same handler is Machine by construction.
+
+**The two candidate resolutions are opposite, which is why this is recorded rather than fixed:**
+
+- **Specify `droppriv` in Sail.** Then the RTL is right, the model is incomplete, and a one-way
+  privilege drop with no trap restore becomes a deliberate architectural property -- a strong one,
+  arguably, since it means a compartment cannot regain privilege by faulting. But it also means a
+  machine that has dropped privilege once can never run a privileged handler again, which no operating
+  system can live with.
+- **Delete `droppriv` from the RTL and use `mret`/`MPP`.** Then Sail is right, the RTL was scaffolding,
+  and 23 gates change their meaning at once.
+
+**The test asserts neither answer.** It pins the measured behaviour so that whichever way the decision
+goes, the change is visible rather than silent -- the same discipline as recording an expected-DIVERGE
+probe rather than hiding it.
+
+**And a test-writing note worth keeping, because it is the session's recurring shape and it caught me
+again.** The first draft of this test bound into **c11** and read tag 1, concluding the opposite. c11
+is a **seeded fixture**, and the suite runs with `+veda_fixtures`: a *failed* bind leaves the fixture's
+own tag standing, so the test was measuring the fixture rather than the bind. Moved to c9, which is
+outside the fixture range on both layers -- the property R24 established when it needed exactly this.
+The trap count is now asserted alongside, which is what stops the tag check passing for an unrelated
+reason.
+
 ### R30. The RTL executes encodings the architecture never allocated
 
 **Status: FIXED AND VERIFIED. RTL 88/88, Sail 99/99, and four differential probes flipped from
