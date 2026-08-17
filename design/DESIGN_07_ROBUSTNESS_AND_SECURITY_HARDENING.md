@@ -909,10 +909,162 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R40. Four permission bits the specification declares Active are enforced by neither layer
+
+**Status: MEASURED ON BOTH LAYERS BY EXHAUSTIVE ENUMERATION, NOT SAMPLING. Recorded, not yet fixed --
+the fix touches the same two dereference checkers R38 just changed, and one of the four needs a design
+decision the machine cannot express yet. Found while grounding R38, and confirmed independently by a
+reader that had not been told to look for it.**
+
+Every `permBit` call in the Sail model enforces exactly eight permissions: EXECUTE, LOAD, STORE,
+ACCESS_SYSTEM_REGISTERS, SEAL, UNSEAL, INVOKE, NMC_COMPUTE. Every permission bit the RTL ever indexes
+is one of five: `rs1cap_perms[1]`, `[2]`, `[3]`, `[10]`, `[12]`.
+
+**Never enforced on either layer: bit 0 GLOBAL, bit 4 LOAD_CAPABILITY, bit 5 STORE_CAPABILITY, bit 6
+STORE_LOCAL_CAPABILITY.** Cause codes `0x10`, `0x14`, `0x15`, `0x16` appear **zero times** in the whole
+Sail model and **zero times** in `veda_core.tlv`. `VEDA_CORE_SPEC.md` marks all four **Active**, in a
+table whose own vocabulary distinguishes Active from *"Reserved slot, kept available"* (0x08) and
+*"reserved"* (0x09-0x0f, 0x17). Bit 11 SET_CID is also unenforced and is the one the spec honestly
+marks reserved/inactive.
+
+**THE ATTENUATION IS REAL AND GOVERNS NOTHING.** `CAndPerm` genuinely applies the mask
+(`$veda_rs1cap_perms & $rs2_data[15:0]`), the cleared bit is stored in the capability, and `CGetPerm`
+faithfully reports it cleared. No check ever reads it.
+
+**WHY THESE THREE IN PARTICULAR ARE THE SEVERE ONES.** They are exactly the bits that decide whether
+**authority itself** may move through memory. `OCS_C` calls `veda_check_access(capidx, offset, 32,
+false, true, true)` and `OCL_C` the load equivalent -- so capability-width memory access is authorised
+by the plain DATA permissions. Reachable consequence:
+
+1. an owner stores a capability into object O with `OCS.C`
+2. it delegates O with `CAndPerm` clearing bit 4, keeping bit 2 -- *"data only"*
+3. the delegate runs `OCL.C`, passes the PERM_LOAD check, and the model executes
+   `C(rd) = loaded_cap; CTag(rd) = tag` -- **a live, tagged capability, naming an object it was never
+   given.**
+
+In an address-less machine where all authority is capabilities, that is amplification through an
+attenuation the machine accepted and ignored.
+
+**THE RECEIPT IS ALREADY IN THE CORPUS, PASSING.** `vc_ocl_ocs_c.S` performs its whole
+capability-through-memory round trip through Object_ID 1, whose Perms are `0x100C` -- bits 2, 3 and 12,
+with **bits 4 and 5 clear**. It has been green since Milestone 7. This is the third time this session a
+passing test has turned out to demonstrate the gap it was written to exercise, after `veda_smoke_r27_
+csr_priv.S` and `vc_check_order.S` PHASE D. **A corpus can only catch what someone thought to assert.**
+
+**WHAT IT BEARS ON R38.** The recorded Design A wanted to spend one of the remaining free Perms bits on
+a new "may split" permission. The free bits are 13, 14 and 15 -- **not 11, which is SET_CID; the
+earlier note was wrong.** Adding a fifth decorative bit to a lattice where four are already decorative
+would have been the wrong order of work, and R38 resolved with no new bit at all.
+
+**WHAT IS NOT YET DECIDED, and why this is recorded rather than half-built.** Three of the four are
+straightforward arms in the two dereference checkers. **GLOBAL is not**: it governs whether a "local"
+capability may be stored into globally-reachable memory, and this machine has no local/global
+distinction to test -- adding the arm would need that concept first. And the trap-versus-tag-clear
+question is a real architectural choice: Veda-Core's own spec already declares all four as
+*Violations*, and unlike a machine where one instruction moves both data and capabilities, here
+`OCL.D`/`OCS.D` and `OCL.C`/`OCS.C` are **separate instructions** with byte-granular tag invalidation
+on the data path -- so a data copier cannot move a capability by accident, and there is no
+generic-memcpy case that a trap would break. That argues for the trap, which is what the spec says.
+Stated here so the increment starts from a decision rather than a habit.
+
+### R38 RESOLVED. The predicate is PERM_STORE, and both designs I recorded were refuted first
+
+**Status: FIXED AND VERIFIED ON BOTH LAYERS. Sail 101/101, RTL 90/90, ACT4 51/51, differential 17/17.
+One condition deleted in two Sail arms and five RTL cause-chain arms. No new permission bit. The
+finding as first measured is the entry below this one.**
+
+**THE TWO DESIGNS I HAD RECORDED WERE BOTH WRONG, AND THE CODEBASE SAID SO IN A COMMENT SITTING THREE
+LINES ABOVE THE FUNCTION THEY BOTH WANTED TO CHANGE.** Design A was a new attenuable "may split"
+permission bit; Design B was to stop stripping PERM_STORE at Bind so PERM_STORE itself carried the
+right. Both rest a refusal on a capability the delegator attenuates with `CAndPerm`. DESIGN_02's own
+correction, recorded at both `veda_bind_perms` call sites, kills that outright: *"a capability handed
+out with store stripped is only ADVISORY, because the holder can re-Bind the name and get a fresh,
+fully-permissioned one. So the attenuation has to happen HERE, where the entry is the authority and no
+re-derivation can escape it."* Bind's domain gate defaults to `VEDA_DOMAIN_ANY` -- *"how every object
+is created"* -- so **any domain may re-Bind any object and re-derive Perms from the entry.**
+Capability-carried attenuation is not binding by default, and neither recorded design survived that.
+
+**AND DESIGN A HAD A SECOND, WORSE DEFECT AN ADVERSARIAL PASS FOUND THAT I HAD NOT.** The cow arm is
+the LAST arm of the chain and its `else` is the SUCCESS path. Conditioning it on a new permission,
+while leaving the store arm gated on not-cow, makes a capability that HAS store but lacks the new bit
+fall straight through to Ok -- **the fork parent's first write silently mutates the shared object, on
+both layers, with no attacker and no attenuation.** Design A was not merely insufficient; it was a
+silent write-through.
+
+**THE ANSWER NEEDED NO NEW MECHANISM, ONLY THE DELETION OF ONE CONDITION.** The store-permission arm
+carried `& not(entry.cow)`, so on a cow object the capability's own store permission was never
+consulted at all. Deleting that conjunct -- in `veda_check_access`, in `veda_check_nmc_access`, and in
+the five RTL cause chains -- lets it decide:
+
+| | before | after |
+|---|---|---|
+| capability WITH PERM_STORE, cow object | 0x0C, splits | 0x0C, splits |
+| capability WITHOUT it, cow object | **0x0C, splits** | **0x13, refused** |
+| re-Bind after set.cow | store stripped, splits anyway | store stripped, **cannot escape** |
+
+Because `veda.odt.set.cow` deliberately does not bump the generation, the capabilities that still carry
+store are exactly those minted BEFORE the object became copy-on-write. So the rule the hardware now
+enforces is: **whoever held write authority at the moment the object became copy-on-write may cause the
+split; whoever learns the Object_ID afterwards may read.** That is what copy-on-write has always
+meant -- the copy is owed to the writers that existed at fork, not to anyone who later learns the name.
+
+**AND IT IS NON-ADVISORY PRECISELY BECAUSE THE BIND-TIME MASK STAYS.** The 0xFFF7 mask is the one
+attenuation a re-Bind cannot escape. Until now that mask did **no enforcement work at all**: the cow
+arm caught every write regardless of Perms, so the mask's only observable effect was the value
+`CGetPerm` returned. This change is what finally gives it something to enforce -- an inert mechanism
+activated rather than a new one added.
+
+**WHAT IT DELIBERATELY CANNOT EXPRESS, and why that is not a loss.** "Read-only but splittable" is
+now inexpressible: if an entry's Perms lack PERM_STORE, no capability to it may ever force a copy. A
+reader who wants a private writable version should ALLOCATE one and copy through the read capability
+it already holds -- the same self-service answer R19 decided for the copier itself. Copy-on-write
+exists to DEFER a copy that is already owed, not to manufacture an entitlement the holder never had.
+
+**THE BLAST RADIUS WAS THREE FILES, AND THE ONE THAT BROKE TAUGHT SOMETHING.** Every existing COW test
+binds BEFORE `set.cow`, so their fault assertions were untouched. The three that changed all encoded
+the defect: `vc_check_order.S` PHASE D, its RTL mirror, and `p14_cow_eligibility.S`. PHASE D is worth
+quoting, because it was a **mutation-caught** test whose own header recorded the right observation and
+drew the opposite conclusion: *"every existing cow test inspects the attenuated capability with
+CGetPerm and never DEREFERENCES through it -- attenuation tested as bookkeeping, never as
+enforcement."* Correct. Dereferencing through the attenuated capability is the right test; expecting
+0x0C from it was the defect. It still catches its original mutant, now in the enforcing direction.
+
+**AND THE RTL MIRROR FAILED FOR A REASON WORTH KEEPING.** Its P7 positive control regressed from 0x2C
+to 0x33 -- because the phase carried a line reading `veda.bind c1, 1  # re-bind c1 (P2 left it
+unchanged, be explicit)`. Added for tidiness, harmless right up until the predicate started reading
+permissions, at which point that re-bind ran the mask and **turned the positive control into a
+negative one**: the phase that exists to prove copy-on-write still fires would have been proving the
+opposite. The line is gone and the reason is in the source. A redundant re-derivation is not neutral in
+a machine where derivation attenuates.
+
+**THE PROBE NOW CARRIES A POSITIVE CONTROL, which it did not before.** `p14_cow_eligibility.S`
+measures the refusal AND that a pre-cow holder still splits (0x6C). Without that word the probe would
+pass just as happily if the cow arm had been deleted -- the same false-AGREE this suite already has a
+receipt for.
+
+**ONE THING THIS OPENS, MEASURED AND RECORDED RATHER THAN PATCHED: R38(b).** The split right now lives
+only inside live capability registers, and `veda.odt.page.out` invalidates every live capability
+(`generation + 1`) while carrying `cow` across unchanged. After one paging round trip **nobody on the
+machine can split the object.** That was an argument until it was run:
+`sail_tests/vc_r38_cow_paging_lockout.S` pins all five phases, including that privileged software can
+still release the object by clearing `cow`. It is fail-closed -- it denies a write, never grants one --
+and before this change the "liveness" came from the hole itself. The leading closure is to make
+page-out refuse on a copy-on-write object, and its cost has to be stated with it: copy-on-write objects
+become unpageable, which is the exact memory pressure paging exists to relieve. Recorded, not
+half-built.
+
+**A METHOD NOTE I OWE THE RECORD.** I edited the tree while independent analysis agents were reading
+it, so one of them correctly reported that its own brief was stale. That is this project's own
+"a sweep tree is not truth" lesson arriving from the other side -- I was the writer this time. Their
+findings were treated as claims to verify at source, which is how the paging interaction above was
+confirmed: the agent's argument rested on paging bumping the generation, a comment in this very file
+said paging never bumps, and **the comment was the fossil.** It has been corrected in both dereference
+checkers.
+
 ### R38. The copy-on-write fault asks WHETHER, never WHO
 
-**Status: MEASURED ON BOTH LAYERS. Design recorded, NOT ratified -- deliberately, in the same shape
-the bounded-granule copy was recorded and not built.**
+**Status: RESOLVED by the entry above. The predicate is the capability's own PERM_STORE; the two
+designs recorded below were refuted before anything was built. The finding as first measured follows.**
 
 "R19 DECIDED" left exactly one thing ratified as hardware and unbuilt: *"the COW fault's own
 eligibility predicate -- who is entitled to cause a split. That is where a real security problem
