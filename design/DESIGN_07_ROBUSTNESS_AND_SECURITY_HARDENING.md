@@ -1411,7 +1411,10 @@ assigned target died -- is R21 below, which is worse, needs no clock, and had be
 
 ### R21. The Milestone 24 stall swallows its own trap, fail-open
 
-**Status: FIX 1 APPLIED (security). FIX 2 SPECIFIED, NOT APPLIED (correctness). Unreachable in the shipped build.**
+**Status: CLOSED, and the recorded premise below was WRONG. FIX 1 closed R21 completely. FIX 2 has NO
+REACHABLE TRIGGER -- proven by construction and then measured at DRAM_EXTRA_CYCLES = 10. It is
+deliberately NOT built; a tripwire fires if it ever becomes reachable. The stall path is now
+script-verifiable at nonzero E: 88/88 at E = 0 and 88/88 at E = 10.**
 
 At `DRAM_EXTRA_CYCLES != 0`, an OCL.C/OCS.C (or a bind) that BOTH violates AND misses the TCM tier:
 
@@ -1430,8 +1433,23 @@ At `DRAM_EXTRA_CYCLES != 0`, an OCL.C/OCS.C (or a bind) that BOTH violates AND m
 pc+4 with the compartment PCC bound removed and the region reset to 0.** That is a compartment escape, not an
 information leak. No clock, no sweep, no statistics.
 
-The same mux also silently swallows ordinary taken branches, JAL/JALR, OCInvoke/OCReturn and mret -- a separate
-functional-correctness bug at the same place.
+~~The same mux also silently swallows ordinary taken branches, JAL/JALR, OCInvoke/OCReturn and mret --
+a separate functional-correctness bug at the same place.~~ **THIS IS FALSE AND THE CORRECTION IS THE
+MAIN RESULT OF THE INCREMENT.**
+
+A redirect is lost only if `$pc_src` and `$veda_dram_busy` are true in the SAME cycle. This is a
+single-stage machine -- `|cpu @0`, and there is no `@1` -- so both are functions of ONE `$instr`.
+Every instruction that can request a stall is **custom-0** (`0001011`): the three Bind modes and
+OCL.C/OCS.C. Every non-trap redirect lives in a different opcode -- branch `1100011`, jalr `1100111`,
+jal `1101111`, system/mret `1110011`, and the OC* jumps in custom-2 `1011011`. **One instruction
+cannot be both**, and during continuation cycles `$instr` is a forced NOP so nothing executes there
+either.
+
+The only redirect a custom-0 instruction can raise is its own trap, and FIX 1 excludes every trapping
+condition on exactly those five instructions. **So FIX 1 closed R21 completely and FIX 2 has no
+reachable trigger.** Two independent enumerations reached this before I did, and I verified it at
+source rather than taking it: the opcode constants, the single-stage structure and the stall-request
+term list.
 
 **The most instructive detail: the author had already found this hazard, on the other side.** The comment at
 :1436 states the `!$veda_pcc_violation` guard exists precisely so "a faulting fetch must not spuriously start a
@@ -1447,16 +1465,50 @@ residency_fault, while `$veda_bind_trap` alone is only owner||notfound (:1974). 
 The edit is **strictly monotone** -- it only ever removes stalls, and only on paths that trap anyway. It cannot
 create a stall that did not exist, so it cannot open a new escape.
 
-**FIX 2, specified but deliberately NOT applied.** Latch a redirect that coincides with the start of a stall and
-replay it when busy clears, ahead of the pc+4 fallthrough. This is what fixes the swallowed branches, jumps and
-mret. It is **not** applied in the same increment because it restructures the `$pc` mux -- the most safety-critical
-expression in the core -- and unlike FIX 1 it is not monotone. It goes in on its own, with its own test.
+**FIX 2: STILL NOT APPLIED, and now for a better reason than sequencing.** It restructures the `$pc`
+mux -- the most safety-critical expression in the core -- and unlike FIX 1 it is **not monotone**: it
+can *create* a redirect where none happened. Taking that risk for **zero present benefit**, against a
+hazard that only appears if someone later widens the stall scope, is not hardening; it is churn on
+the one expression that must not churn.
+
+**So the hazard got a tripwire instead.** `$veda_redirect_during_stall_start = $veda_dram_stall_req &&
+$pc_src` drives nothing and gates nothing -- it cannot change behaviour -- but a `$fatal` fires the
+moment the precondition for FIX 2 becomes reachable, naming FIX 2 in the message. That converts a
+comment about future work into something that **fires**. Widen the stall scope past bind/OCL.C/OCS.C,
+as this file already flags as planned, and the first simulation to hit the co-occurrence stops and
+says so instead of silently discarding a redirect the way R21 originally did.
+
+**Measured, not just argued: at E = 10 the tripwire never fired across the whole suite.** FIX 2 is
+unreachable with a real stall running, not merely on paper.
+
+**THE PROVING RUN, which was the other half of this item.** `rtl/run_dram_stall_test.sh` edits the
+localparam, transpiles, runs the suite and **always restores on a trap** so an interrupted run cannot
+leave the tree at nonzero E. Its most important property is the one the finding demanded: **it
+REFUSES to run at E = 0**, with a nonzero exit and a message saying why, rather than passing
+vacuously. That is enforced by the script rather than by an assertion inside a testbench, which could
+itself be satisfied vacuously.
+
+Getting to a clean run took two rounds of measurement rather than one. The first E = 10 run gave
+**15 failures**, all with the unwritten-register signature of a cycle-budget overrun -- each stall
+adds E cycles and the testbench windows were sized for E = 0. Widening every budget fourfold is
+monotone at E = 0 (the program is already spinning in its halt loop) and took it to **3**.
+
+**Those last three were the interesting ones, and they were not budgets.** They are the Milestone 24
+stall tests, and their own headers said it: the permanent check was `busy_cycles == 0` at the shipped
+default, while *"the OTHER half of this feature ... was verified **manually** this same session"*.
+**A manual verification is exactly the gap this document has spent the increment closing everywhere
+else.** They now compute their expectation as `DRAM_EXTRA_CYCLES * VEDA_DRAM_ACCESSES`, so one
+testbench covers both configurations and neither is checked by hand.
+
+The access counts were **measured, and the first attempt guessed them wrong**: a regex put 4 in all
+three, and the real counts read off a run at E = 10 are **2, 1 and 5**. The number is a structural
+property of each test program, and taking it from the hardware is how it stays true when the test
+changes.
 
 **Reachability, stated plainly and NOT counted as a defence.** `DRAM_EXTRA_CYCLES = 0` (:188) plus the
-`!= 0` guard make `$veda_dram_busy` a structural constant 0, so neither bug is reachable in the shipped build.
-But the nonzero default is named in the file itself as planned follow-up work, and E was swept {0, 10, 50} during
-verification. **Widening the 46 test budgets to enable nonzero E is now blocked on FIX 2 and its test**, and that
-follow-up must not be treated as mechanical.
+`!= 0` guard make `$veda_dram_busy` a structural constant 0, so the bug is unreachable in the shipped
+build. **That blocker is now lifted**: the budgets are widened, the three E-dependent testbenches are
+E-aware, and nonzero E is a supported, script-verified configuration rather than a manual exercise.
 
 **Why the existing suite could not catch it.** M24 verified the stall with a **positive latency test only** -- a
 faulting access during a stall was never exercised. Identical in shape to the CAndPerm defect: *tested as
