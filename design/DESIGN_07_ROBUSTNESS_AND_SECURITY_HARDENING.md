@@ -964,9 +964,9 @@ are **umbrellas that look like terminals**, and listing them would re-open the w
 
 ### R33. The base ISA is fail-open too, and one umbrella was destroying capabilities
 
-**Status: R33a SHIPPED AND VERIFIED. R33b DELIBERATELY NOT SHIPPED -- an adversarial lens showed it
-would give a confidently wrong answer for five instructions, and the reason is recorded below rather
-than discovered later.**
+**Status: CLOSED. All four increments shipped in the order the adversarial pass forced --
+R33a, then the two class-B debts, then the catch-all. `mul 3*4` went from retiring `x3 = 0` with zero
+traps to trapping. Smoke 88/88, ACT4 51/51, differential suite 13/13, eight mutants all killed.**
 
 R30 closed Veda's own opcode space. The base ISA had the same disease and a worse symptom. Measured
 by running the hardware: **`mul x3, x1, x2` with 3 and 4 retires `x3 = 0` and takes no trap; `ebreak`
@@ -1033,10 +1033,45 @@ check does not fire either. Closing the CSR forms is therefore not only a featur
 a fix that is already shipped.
 
 **The order that follows from all of this**, and it is the opposite of the order I would have chosen
-without the attack: close the class-B debts *first* (R33c: the four CSR forms, which also completes
-R32; R33d: EBREAK with a real mcause 3 arm), then land the catch-all, whose carve-out shrinks to
-nothing as each debt closes. Shipping the catch-all first would bake five wrong answers into the
-machine and no test in either suite could catch them.
+without the attack: close the class-B debts *first*, then land the catch-all, whose carve-out shrinks
+to nothing as each debt closes. Shipping the catch-all first would bake five wrong answers into the
+machine and no test in either suite could catch them. **All three shipped in that order.**
+
+**R33c -- all six Zicsr forms.** `funct3` is `{is_imm, csrop}`, so only 000 and 100 are unallocated in
+that opcode; the immediate is the rs1 *field* zero-extended, not a register read. The access-type
+table is mirrored exactly, including the rule that **a SET or CLEAR whose source is zero is a PURE
+READ that must not write** -- which is what `csrr` expands to and what every trap handler in this
+project depends on.
+
+**And it completed R32, which had already shipped.** `$veda_csr_undef` is gated on `$is_csr_access`,
+and that was the OR of CSRRW and CSRRS *only* -- so a `csrrci` to a nonexistent CSR was **doubly
+silent**: the instruction did not decode, and the address check did not fire either. Extending the OR
+closes that, and extends the compartment escape gates to the four new write paths in the same stroke.
+**That was the real hazard: four ways into the compartment-state CSRs that no gate had ever seen.**
+
+**R33d -- EBREAK, mcause 3, mtval = the faulting PC.** Both values **measured** against this project's
+own Sail config rather than assumed, because the breakpoint mtval is policy-controlled by
+`base.xtval_nonzero.software_breakpoint`. The trap chain had **no path to 3** -- a three-way ternary
+yielding 0x02/0x0B/0x18 -- so this needed a fourth mcause arm, an mtval arm, and a trap source that
+deliberately does *not* join `$veda_illegal_instr`, because a breakpoint is a real synchronous
+exception and not an illegal instruction.
+
+**R33b -- the catch-all**, written as the **complement** rather than a positive opcode list, so
+`$veda_undef_encoding` and `$base_undef_encoding` partition the whole opcode space with no third
+region. 59 terminals; the only three opcode-only entries are LUI, AUIPC and JAL, which is correct
+since U-type and J-type have no funct fields to constrain.
+
+**Purely additive -- a trap and nothing else -- and proven rather than assumed.** After R33a every
+effect path is an OR of positive decode terms, so a word no terminal claims already did nothing and
+now also traps. No side-effect squashing was needed, which is exactly what R33a bought.
+
+**Eight mutants, all killed**, and **one survived first** -- which is the other half of the lesson.
+Forcing `$csr_write_en` true SURVIVED, because `csrrsi` with `imm=0` writes `old | 0`, which is `old`:
+the register is unchanged either way and the probe could not tell a pure read from a
+read-modify-write. **The discriminator is a READ-ONLY CSR.** `csrr x3, 0x7C6` *is* `csrrs` with
+`rs1=x0`, so under the correct rule it is a pure read and must not trap; with the rule broken it
+becomes a write to a read-only CSR and does. Sail 1 trap, mutant 2. **The same vacuity shape the
+census keeps finding, on a phase I had just written.**
 
 ### R32. The CSR address space is a second fail-open surface, and the encoding catch-all cannot reach it
 
