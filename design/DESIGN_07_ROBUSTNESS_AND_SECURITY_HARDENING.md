@@ -909,6 +909,61 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R38. The copy-on-write fault asks WHETHER, never WHO
+
+**Status: MEASURED ON BOTH LAYERS. Design recorded, NOT ratified -- deliberately, in the same shape
+the bounded-granule copy was recorded and not built.**
+
+"R19 DECIDED" left exactly one thing ratified as hardware and unbuilt: *"the COW fault's own
+eligibility predicate -- who is entitled to cause a split. That is where a real security problem
+remains and where hardware is the right answer."* This is that predicate, measured.
+
+**Today it is the whole of it, on both layers:**
+
+    Sail:  else if need_store & entry.cow then Err(VEDA_CAUSE_COW_FAULT)
+    RTL:   $veda_cow_write = $veda_check_odt_cow
+
+No owner test, no domain test, no permission test. The fault fires for **anyone** holding **any**
+capability to a cow entry who attempts **any** store.
+
+**Measured** (`difftest/probes/p14_cow_eligibility.S`), and the control is what makes it a finding:
+
+| | measured |
+|---|---|
+| the delegate's capability permissions | `0x0004` -- **LOAD only**; Bind stripped STORE because the entry is cow |
+| three consecutive stores through it | `0x0C` COW every time -- unlimited, unrated, unrefused |
+| **control:** same missing store permission on a **non-cow** object | **`0x13` PERM_STORE** |
+
+**So the machine can already distinguish "you may not write" from "you may not write yet" -- and it
+chooses the second without ever asking who is asking.** A principal handed a read-only view arms an
+allocation on every store attempt, indefinitely, **holding no write authority at all**. The model's
+own comment beside the fault already names the category: *"the rest is ordering hygiene and resource
+containment."*
+
+**THE DESIGN, and the constraint that rules out the obvious answer.** The obvious predicate is
+"only the owning domain may split", and the machinery exists (`veda_bind_domain_ok` already reads
+`e.owner_domain`). **It breaks the primary use case.** In `fork` the child is typically a *different*
+domain, and the child splitting is the entire point. An owner-only predicate would make `fork` work
+only within one domain.
+
+What distinguishes a legitimate splitter from an exhaustion attacker is not who they are but **what
+they were given** -- and this machine expresses that in exactly one way: **a permission bit the
+delegator controls**. A parent forking hands the child a capability *with* it; a domain handing out a
+read-only view hands one *without*, and a store attempt then takes the ordinary `0x13` the control
+above already demonstrates. `CAndPerm` can clear it, so it is **attenuable** -- which is what makes it
+a capability property rather than a policy. Perms bits 11, 13, 14 and 15 are unallocated.
+
+**One rule the implementation must not get wrong:** `veda_bind_perms` clears bit 3 when the entry is
+cow. The split bit must be **preserved** through that masking, or nobody could ever split and `fork`
+would be dead rather than merely ungoverned.
+
+**The honest limit, stated so it is not oversold.** This does not stop an owner exhausting itself, and
+it does not stop a delegate that was deliberately given the right. It converts an **ambient** capacity
+into a **delegated** one -- which is what this machine does everywhere else, and is the whole of what
+it buys. Not ratified here for the same reason the bounded-granule copy was not: it is a new
+architectural rule, and the record's discipline is to state the shape, measure the problem, and let
+the increment be taken deliberately rather than at the end of a long pass.
+
 ### R37. The three Special Capability Registers never got R24's reset
 
 **Status: FIXED AND VERIFIED. Sail 99/99, differential probe flipped DIVERGE -> AGREE, mutant killed.**
@@ -1798,8 +1853,19 @@ not settled by whichever way `cgetbase` happens to drift.
 
 ### R19. Copy-on-write needs a copier, and a copier needs universal read authority
 
-**Status: OPEN. Not a bug in anything built -- a consequence of what was just completed, noticed
-before it hardened into a convention.**
+**Status: SUPERSEDED -- see "R19 DECIDED" earlier in this document. THIS ENTRY IS THE ORIGINAL
+FRAMING AND ITS PREMISE IS FALSE. It is kept because the six corrections to it are worth more than
+the decision was, but its status line said OPEN for long enough to mislead a later reader of this
+very document into re-opening a settled question. A stale status is not a harmless leftover: it is
+the only part of an entry a reader trusts without reading the rest.**
+
+The short version of what replaced it: `veda_bind_perms` clears **bit 3 only**, and PERM_LOAD is
+bit 2 -- so a COW-attenuated capability **is a read capability**, which is why the fault is a STORE
+fault. The principal that takes the fault already holds read on the object it needs copied. That is
+option **(d), self-service**, which this entry did not list, and options (a), (b) and (c) were all
+payments to avoid granting an authority the right party already holds.
+
+*Original framing follows, preserved for its corrections:*
 
 The `fork` hardware chain is now complete on both layers: policy write path, per-object bind
 authority, the `cow` bit, Bind attenuation, the COW fault on all five write paths, and
