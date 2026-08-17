@@ -1635,9 +1635,63 @@ whole bug class hides behind E=0 forever, which is exactly how it survived M24.
 all (`mcycle` ticks once per instruction step). That is itself a hazard worth naming -- **this class of bug cannot
 be caught by Sail-versus-RTL parity review, because the layer that would catch it does not model the mechanism.**
 
-### R22. The corpus contradicts itself on the address-less pillar
+### R22 / R9. The address-less pillar, the timing rule, and the per-access ODT read -- ALL THREE RESOLVED
 
-**Status: OPEN. Pre-existing, independent of Milestone 24, surfaced by R20's refutation.**
+**Status: DECIDED AND ENFORCED. The throughput "tension" does not exist, and the reason is structural.
+Both specification questions are answered, and the coupling between them is now a check that fails,
+not a paragraph. Mutation-tested both ways.**
+
+**FIRST, THE THROUGHPUT ITEM, because it dissolves rather than resolves.** The worry was that every
+dereference must read an ODT entry: from DRAM each time and throughput collapses, from a cache and the
+cache-less pillar dies. **Neither happens.** Verified at source, both tier tests are pure combinational
+functions of values software itself chose at Populate time:
+
+    $veda_odt_tcm_hit    = $veda_intra_region && ($veda_local < TCM_ODT_ENTRIES)
+    $veda_capmem_tcm_hit = (real_addr >= TCM_SCRATCH_BASE) && (real_addr < TCM_SCRATCH_BASE + SIZE)
+
+No tag array, no valid bits, no fill-on-miss, no replacement policy, no history. The **same object hits
+or misses forever**, and what decides it is where software put it. All twelve mentions of
+eviction/replacement in the RTL are comments about the *software* pager (`page.out`/`page.in`), which
+is an instruction software issues, not a hardware policy. The file already states the property for the
+CRBR in its own words: *"NOT a cache and NOT a TLB: one base, no tags, no fill-on-miss, no eviction,
+no access history."*
+
+**So this is not a cache, it is a static placement decode -- and that is the whole point. A cache buys
+throughput with ACCESS HISTORY, and history is the channel. This buys throughput with PLACEMENT,
+which the accessor already knows.** The cache-less pillar and per-access enforcement are not in
+tension; the tier is what makes them compatible.
+
+**SECOND, THE TIMING RULE. Adopted: the second bullet** -- *"tier selection must not depend on any
+value software cannot already read architecturally."* Not the first. Declaring no timing claim at all
+would discard a property this architecture can genuinely make, and R5 already elevates
+non-speculation to a pillar on exactly that reasoning; giving up the neighbouring guarantee in the
+same document would be incoherent.
+
+**THIRD, THE PILLAR WORDING. Amended to the invariant actually built:** *"software cannot REACH memory
+by a raw address."* R16's stronger sentence -- that software cannot **see** one -- was never built.
+Milestone 19 made a leaked address unusable, not unlearnable, and `cgetbase` ships returning a raw
+physical Base by design. **The two sentences could not both be true, and the one that goes is the one
+nothing implements.**
+
+**AND THE COUPLING IS NOW A CHECK.** R22 predicted that tier selection is conformant *"only because
+`cgetbase` is open"*, and said the narrowing must land *"in the same commit"*. A comment cannot enforce
+"in the same commit". `veda-core/check_timing_coupling.sh` can, and runs first in the RTL suite. It
+fails the build if the capability-query family ever grows an authority gate while tier selection still
+reads Base or the local ID -- so whoever gates `cgetbase` is told by a red suite that they owe the
+other half. It also fails if a replacement policy ever appears in the RTL, because hit/miss would then
+depend on access history, which is precisely the channel the pillar exists to remove.
+
+It makes **no performance claim and takes no measurement** -- it is a structural invariant over the
+source. That is deliberate: this document's own rule is that **a throughput measurement must never be
+allowed to decide a security question**, so the enforcement of a security rule must not be a benchmark.
+
+**Mutation-tested both ways, and the first draft failed.** Gating the query family: caught. Adding a
+replacement policy: **SURVIVED** the first version, because the detector used `\b` word boundaries and
+`_` is a word character -- so `\blru\b` does not match inside `$veda_odt_lru_victim`, which is exactly
+how such a signal would be named here. **The check passed on a design that had just grown a
+replacement policy.** Widened to substring matching; both mutants now die and the clean tree passes.
+Found by mutating the check rather than trusting it -- the same lesson this document keeps recording,
+this time about a check written to enforce the lesson.
 
 R16 in this document states "Software is not supposed to be able to see a physical address at all." Meanwhile
 `cgetbase` ships returning a raw physical Base and `cgetaddr` returns Base+Offset resolved, both unit-tested to
