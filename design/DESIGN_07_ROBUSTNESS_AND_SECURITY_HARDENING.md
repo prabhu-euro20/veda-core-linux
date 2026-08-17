@@ -909,6 +909,34 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R37. The three Special Capability Registers never got R24's reset
+
+**Status: FIXED AND VERIFIED. Sail 99/99, differential probe flipped DIVERGE -> AGREE, mutant killed.**
+
+R24 gave the capability register **file** a defined architectural reset, because Sail's struct default
+leaves `otype` at 0x0000 and `isSealedCap` is `otype != UNSEALED_OTYPE` -- so an untouched register
+read as **sealed with type zero**, a type CSeal can genuinely mint. **`veda_oda`, `veda_tsc` and
+`veda_ssc` were not in that fix and had no reset at all.**
+
+**It matters most on the ODA.** `veda_oda_authorized()` reads
+`veda_oda_tag & not(isSealedCap(veda_oda)) & permBit(Perms, PERM_ACCESS_SYSTEM_REGISTERS)`, so this
+register's sealedness is an input to the gate on **every ODT-mutating instruction**. The gate was
+false at reset either way -- but only because the **tag** is false. **Fail-closed by accident of a
+different field, not by this one being right**, which is precisely the argument R24 made.
+
+Measured (`difftest/probes/p13_scr_reset.S`): all three read otype 0x0000 on Sail against 0xFFFF on
+the RTL. **The probe's control is what makes it a finding rather than a guess** -- an untouched CRF
+register, already fixed by R24, agreed at 0xFFFF on both, so the divergence was specific to these
+three and not a general disagreement about what an unwritten capability looks like. `OSpecialRW`
+swaps rather than writes, so the reset value was directly observable by software.
+
+**AND THE SELF-CHECK SUITE IS STRUCTURALLY BLIND TO IT.** Under the mutant that removes
+`veda_reset_scr()`, **all 99 Sail tests still pass** and only the differential probe dies. That is the
+**third time this session** the harness caught what the self-check corpus cannot: a self-check test can
+only observe what a program can ask, and no program in that corpus asks what an untouched Special
+Capability Register contains. The same reason R24 needed the harness, and the reason R31 -- making
+that harness able to fail at all -- was worth doing before any of this.
+
 ### R36. Twenty-three security gates rest on a privilege bit the specification does not define
 
 **Status: MEASURED AND PINNED. Not fixed -- the fix is a specification decision, and the two candidate
