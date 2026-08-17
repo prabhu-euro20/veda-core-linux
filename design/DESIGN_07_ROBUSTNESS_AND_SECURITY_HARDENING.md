@@ -962,6 +962,82 @@ sound in Veda's space because every umbrella there is literally an OR. In the ba
 `$is_store`, `$is_jalr` and `$is_fence` are each a plain comparison against `$opcode` alone -- they
 are **umbrellas that look like terminals**, and listing them would re-open the whole space.
 
+### R33. The base ISA is fail-open too, and one umbrella was destroying capabilities
+
+**Status: R33a SHIPPED AND VERIFIED. R33b DELIBERATELY NOT SHIPPED -- an adversarial lens showed it
+would give a confidently wrong answer for five instructions, and the reason is recorded below rather
+than discovered later.**
+
+R30 closed Veda's own opcode space. The base ISA had the same disease and a worse symptom. Measured
+by running the hardware: **`mul x3, x1, x2` with 3 and 4 retires `x3 = 0` and takes no trap; `ebreak`
+does nothing.** The base decode is a flat list of positive AND-terms with no default arm, and the
+only base-gated inputs to `$veda_trap_taken` in the whole file are `$is_ecall` and
+`$veda_purecap_violation` -- which is zero in the shipped default. **There is no trap source at all.**
+
+**R33a: FOUR UMBRELLAS THAT LOOKED LIKE TERMINALS.** `$is_load`, `$is_store`, `$is_jalr` and
+`$is_fence` were each a bare comparison against `$opcode` with no funct3 test. **R30's checkable rule
+does not transfer**: "a terminal is a comparison, an umbrella is an OR" is sound in Veda's space,
+where every umbrella literally is an OR, and false here -- these four are written in the exact shape
+the rule calls safe, which is why they went unnoticed.
+
+**And one of them destroys capabilities.** The store block writes data through an if/else-if chain on
+the four widths with no else, so an unallocated store writes nothing and looks harmless. But the
+**tag invalidation is a separate `if` at the same nesting level, gated only on the umbrella.** A
+store with `funct3` in {100,101,110,111} therefore **cleared the capability tag at rs1+imm and wrote
+no data** -- a silent capability kill from an instruction RV64I does not define. Measured in
+`p9_tag_destroy.S`: tag 1 on Sail, 0 here, now 1 on both, with a control proving a *legal* store
+clears it on both layers so the probe is not merely observing that stores clear tags.
+
+Also corrected: **RV64 has seven loads, not eight.** `funct3=111` is not LDU -- the model's
+`valid_load_encdec` guard is `(width < xlen_bytes) | (not(is_unsigned) & width <= xlen_bytes)`, and at
+width 8 unsigned both disjuncts are false. And **FENCE is tightened to `funct3=000` and no further**:
+the reserved fm/pred/succ combinations are to be *ignored* by the base spec, not refused, and
+over-tightening is the predictable way to break the fence conformance test, which executes exactly
+those reserved words.
+
+ACT4 51/51 and smoke 88/88, both **unchanged** -- the predicted result, since R33a is
+behaviour-identical for every legitimately-encoded instruction.
+
+**WHY R33b -- THE CATCH-ALL -- IS NOT SHIPPED, and this is the whole value of the adversarial pass.**
+
+*First, why R33a had to land alone.* None of the side-effect paths are gated on `$veda_trap_taken`.
+A catch-all alone would produce a machine that reports mcause 0x02 with mtval holding the offending
+word -- **which a handler correctly reads as "the instruction did not execute"** -- while the tag
+clear still happened. It would look closed, the suite would pass, and the primitive would survive
+behind an illegal-instruction report. Under this document's own value that a green suite measuring
+the wrong artifact is worse than a red one, that is the worst available outcome.
+
+*Second, and this is what stopped R33b.* Two adversarial lenses cleared it with byte-level evidence
+-- the smoke corpus has **zero** undecoded words across 6,380, and every one of ACT4's 71,137
+undecoded words sits after a `jal <failedtest_*>` in unreachable tail padding, with the run-length
+arithmetic closing exactly. **The third lens landed.** Class (B) -- instructions allocated in the
+claimed ISA and missing from this RTL -- is **five instructions with three distinct correct
+behaviours**, and a catch-all converts every one of them into illegal-instruction, which is a
+different wrong answer rather than a fix:
+
+| instruction | correct behaviour | what a catch-all would do |
+|---|---|---|
+| `EBREAK` | Breakpoint exception, **mcause 3**, mtval policy-controlled and *not* the instruction word | mcause 2 with mtval = the word |
+| `CSRRC`, `CSRRWI`, `CSRRSI`, `CSRRCI` | a real read-modify-write | trap |
+
+The RTL records both omissions openly -- EBREAK as "deferred", the CSR scope cut stated in its own
+comment -- so these are known debts, not oversights. But the mcause chain has **no path to 3**: it is
+a three-way ternary yielding 0x02, 0x0B or 0x18, and mtval keys off the illegal term first. EBREAK
+cannot be made correct without touching both.
+
+**A second-order gap in R32, found by the same lens and verified at source.** `$is_csr_access` is
+`$is_csrrw || $is_csrrs` -- only two of Zicsr's six forms -- and `$veda_csr_undef` is gated on it. So
+**R32's address check never sees CSRRC, CSRRWI, CSRRSI or CSRRCI at all**: a `csrrci` to a
+nonexistent CSR is **doubly silent** -- the instruction does not decode, and the address validity
+check does not fire either. Closing the CSR forms is therefore not only a feature debt, it completes
+a fix that is already shipped.
+
+**The order that follows from all of this**, and it is the opposite of the order I would have chosen
+without the attack: close the class-B debts *first* (R33c: the four CSR forms, which also completes
+R32; R33d: EBREAK with a real mcause 3 arm), then land the catch-all, whose carve-out shrinks to
+nothing as each debt closes. Shipping the catch-all first would bake five wrong answers into the
+machine and no test in either suite could catch them.
+
 ### R32. The CSR address space is a second fail-open surface, and the encoding catch-all cannot reach it
 
 **Status: FIXED AND VERIFIED, in the same increment as R30. Found by the adversarial pass on R30's
