@@ -992,10 +992,123 @@ only observe what a program can ask, and no program in that corpus asks what an 
 Capability Register contains. The same reason R24 needed the harness, and the reason R31 -- making
 that harness able to fail at all -- was worth doing before any of this.
 
+### R39. The layer had no generic CSR privilege check -- and R36 could not be fixed without it
+
+**Status: FIXED AND VERIFIED ON BOTH LAYERS. Sail 100/100, RTL 90/90, ACT4 51/51, differential 17/17
+including a probe that could not previously be written at all. R36 is RESOLVED by this same increment;
+its own entry below is the finding, this is the answer.**
+
+**THE DECISION WAS FORCED, NOT CHOSEN, WHICH IS WHY IT COULD BE TAKEN ALONE.** R36 recorded two
+opposite candidates -- specify `veda.droppriv` in the model, or delete it from the RTL and use
+`mstatus.MPP` + `mret` -- and deliberately picked neither. Reading the project's own record decided it:
+`MILESTONE_PLAN.md`'s Milestone 4 addendum justified the custom instruction on exactly one ground,
+*"real `mret` is a trap-return semantic this core has no trap to return from"*. **Milestone 9 built the
+traps and MRET.** The premise expired and the instruction outlived it. The RTL already decoded MRET at
+a fixed literal and already used it as the restore point for PCC, MEPCC, the region and the trap
+depth -- it was the privilege-restore point in every respect except privilege. So the RTL moved to the
+model, and **the model needed no change at all**: it had implemented this since long before Veda
+existed.
+
+**PULLING ON THAT THREAD FOUND SOMETHING BIGGER.** `check_CSR()` in the model is a conjunction of four
+independent tests. This layer had grown three of them across three increments and was missing the
+first, which is also the only one that is about authority:
+
+| model | this layer, before |
+|---|---|
+| `check_CSR_access` (read-only) | `$csr_is_readonly` -- R32 |
+| `is_CSR_accessible` (address) | `$csr_addr_known` -- R32 |
+| `veda_allows_CSR_access` | `$veda_csr_escape_violation` -- M20/R26 |
+| **`check_CSR_priv`** | **nothing whatsoever** |
+
+The rule is a field comparison, not a list: `csrPriv(csr) = csr[9..8]`, and
+`check_CSR_priv(csr, p) = privLevel_to_CSR_privbits(p) >=_u csrPriv(csr)`. **Every one of the fourteen
+CSRs this core implements lives at 0x3xx or 0x7Cx, so all fourteen were readable and writable from
+unprivileged code.** `mtvec`'s only guard was the compartment-escape check, which fires only while a
+compartment is *live* -- so unprivileged code **outside** a compartment could install its own trap
+vector. `mscratch`, `mepc`, `mcause` and `mtval` had no guard at all.
+
+**THE EVIDENCE WAS ALREADY IN THE CORPUS, PASSING.** `veda_smoke_r27_csr_priv.S` dropped privilege,
+read and wrote 0x7C0-0x7C3, asserted a trap count of **zero**, and called that *"matching Sail: the
+register holds, nothing traps"*. Its own header even recorded the gap -- *"This layer has NO standard
+CSR privilege check at all -- verified by grep"* -- and then asserted the gap was correct. It had read
+the inner Veda `write_CSR` clause and missed the generic gate that runs above it. **A test that names a
+weakness and then pins it as the contract is worse than no test: it converts an open question into a
+settled one in the wrong direction.**
+
+**VERIFIED BY RUNNING BOTH LAYERS, NOT BY READING EITHER.** A throwaway probe entered U-mode via
+`mstatus.MPP` + `mret` and issued `csrr x10, 0x7c1`: Illegal_Instruction, `mepc` exactly at the `csrr`.
+That probe is now `sail_tests/vc_r39_csr_priv.S`, because the model being right was never the problem --
+nothing in the suite *said* what the contract was, which is how the RTL test came to assert its
+opposite.
+
+**WHY THE TWO HAD TO SHIP TOGETHER.** With the privilege check in place and no trap-raises-privilege, a
+handler entered after a drop cannot `csrr mepc` and cannot `mret`: **every post-drop trap livelocks.**
+That is the concrete form of R36's warning that "23 gates change their meaning at once". The coherent
+whole is the standard one -- trap raises to Machine, `mret` restores from MPP, MRET below Machine is
+illegal, MPP is WARL-legalised to the two modes this hart actually has, and a CSR access below the
+address's own privilege traps.
+
+**THE MPP LEGALISATION IS LOAD-BEARING, NOT TIDINESS.** `$priv` is one bit. Accepting `MPP = 0b01/0b10`
+would let software park a Supervisor encoding in a field that `$priv` cannot represent, and `MPP[1]`
+would then read as Machine. The legalisation is what stops "write MPP, `mret`" being an escalation --
+and the MRET privilege gate is the second, independent stop on the same path. Both are kept: **an
+escalation that needs only one mistake to reopen is not closed.**
+
+**AND ECALL FINALLY TELLS THE HANDLER WHO CALLED.** `mcause` for `ecall` was hardcoded 0x0B, "from
+Machine mode", carrying the comment *"the only possible value since this core only ever runs M-mode"* --
+false in the same file, which defines `$priv` and had ten test programs that cleared it. So an
+unprivileged compartment's syscall announced itself to the handler as the kernel's own. Stated at its
+real size: **not an escalation, a caller-identity forgery at the one boundary whose entire job is to
+identify the caller** -- and it matters because the handler's authority does not come from the mode.
+Six ODT gates accept `$veda_oda_authorized` with no privilege term at all, so a handler that decides
+how far to trust a request by reading `mcause` is deciding how to spend authority it still holds.
+
+**TWO THINGS THE WORK FOUND THAT I DID NOT GO LOOKING FOR.**
+
+*The refusal was delivering the value anyway.* The R39 test asserted that an unprivileged `csrr` leaves
+`rd` untouched, and it failed: the trap fired **and** 0xFFFFFFFFFF landed in the register. `$reg_write`
+carried a bare `$is_csr_access`, written at Milestone 9 on the stated ground that *"a CSR read/write is
+never itself a Veda-Core violation"* -- true then, falsified since by R32, by M20/R26 and now by R39,
+with none of the three coming back to that line. For a check whose distinguishing property is that
+**reads** are gated, a trap that still hands over the data is the entire property lost. Found by a test
+asserting the strong form rather than the observable one.
+
+*The nested-trap case, and where the hardware-first rule actually ends.* `mstatus.MPP` is a single save
+slot, so a nested trap's inner `mret` consumes it and the outer `mret` returns to User. This broke the
+M21 restore test, which had no privileged state to save before. **Hardware does not fix this, and the
+reason is a real distinction rather than a concession.** R12 made the hardware track MEPCC by depth and
+poison it, correctly, because stale *bounds* can hand back authority never held. A stale MPP can only
+restore **less** privilege than was held -- the specification pins the post-`mret` value to the least
+privileged supported mode, so the failure direction is de-escalation. **Hardware tracks what can
+escalate; software saves what can only de-escalate.** The handler now saves `mstatus` beside the `mepc`
+it already saved, for the reason its own comment already gave. Building a depth-tracked MPP would have
+been non-standard hardware solving a problem the specification already made safe -- and would have put
+this layer straight back into R36's position, implementing privilege behaviour the model does not
+define.
+
+**WHAT THE DIFFERENTIAL HARNESS CAN NOW DO THAT IT COULD NOT.** `p13_scr_reset.S` recorded the
+limitation in its own header: OSpecialRW was *"a clean cross-layer measurement, unlike the privilege
+model"*, because the two layers did not share a mechanism for leaving Machine mode. `p15_priv_model.S`
+measures it now, word for word identical on both, and **non-trivially**: MPP reads User; the U-mode CSR
+read leaves 0xBAD standing; cause 0x02; MRET-below-Machine 0x02; `ecall` 0x08; and an arithmetic
+control returning 10, so that "both layers trapped everything" cannot pass as agreement -- the exact
+false-AGREE this suite already has a receipt for in `p2_derive.S`.
+
+**HONEST LIMITS, NAMED.** `mstatus` implements MIE, MPIE and MPP and reads zero everywhere else. SXL,
+UXL, MPRV, MXR, SUM, TVM/TW/TSR and the S-mode triple have no consumer on this hart -- no S-mode, no
+virtual memory, no interrupt delivery -- and reporting them would be advertising features that do not
+exist, which is the failure mode R32 closed for CSR addresses. The probe therefore compares the MPP
+field and says so, rather than comparing the whole word and calling the difference either agreement or
+a defect. Custom-3 is unclaimed again and every encoding in it now raises Illegal_Instruction on both
+layers, which is what the model always said.
+
 ### R36. Twenty-three security gates rest on a privilege bit the specification does not define
 
-**Status: MEASURED AND PINNED. Not fixed -- the fix is a specification decision, and the two candidate
-answers are opposite. Recorded with its test so the divergence cannot drift while it is decided.**
+**Status: RESOLVED by R39 above, which is the same increment. `veda.droppriv` is retired, Custom-3 is
+unclaimed, and privilege is the specification's: trap raises to Machine, `mret` restores from
+`mstatus.MPP`, software drops by writing MPP and executing `mret`. The decision was forced rather than
+chosen -- this instruction's own recorded justification expired at Milestone 9 -- and the model needed
+no change to accept it. The finding as first measured follows.**
 
 Found while asking a narrower question: why can the differential harness not compare privileged
 behaviour? Because the two layers do not share a privilege mechanism -- and the reason is worse than
