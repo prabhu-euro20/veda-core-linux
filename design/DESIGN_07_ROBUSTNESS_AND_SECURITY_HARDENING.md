@@ -913,14 +913,54 @@ Four mutants, all killed by `veda_smoke_m8_neg` and the R32 probe: delete the ca
 the one that matters -- **list the bind UMBRELLA instead of its three mode terminals**, which is the
 exact mistake that created the Class 2 holes in the first place.
 
-**WHAT THIS DOES NOT CLOSE, so the boundary is inherited rather than silent.** Sail pins reserved-zero
-bits the RTL still ignores: bit 19 above every 4-bit vcap rs1, bit 11 above every vcap rd, bit 24
-above vcap rs2, the rd field on OCInvoke/OCJALR/OCReturn, and the rs2 field on
-CapQuery/CSealEntry/OCReturn/ODT-Destroy/ODT-PageOut. A 1 in any of those is fail-closed in the model
-and still executes the allocated instruction here. The catch-all is
-opcode/funct3/funct7/selector-granular and does not see them. That is a second, smaller R30 and is
-its own item. The base ISA's own fail-open decode -- `mul` retiring `x3 = 0`, `ebreak` doing nothing
--- is likewise untouched: this increment closes Veda's opcode space, which is what Veda owns.
+**THE LAYER BELOW: reserved-zero fields, closed in the next increment (R30b).** The catch-all above is
+opcode/funct3/funct7/selector-granular. Sail pins bits below that, and a 1 in any of them means no
+encdec clause matches, so the wildcard catches it. This layer never looked. Five classes, measured
+on both layers before touching anything -- Sail 5 traps, RTL 1:
+
+| class | where it applies |
+|---|---|
+| bit 19 above a 4-bit vcap `rs1` | 19 of 27 encodings |
+| bit 11 above a vcap `rd` | 11 encodings |
+| bit 24 above a vcap `rs2` | CSeal, CUnseal, OCInvoke, OCJALR |
+| `rd` field nonzero where the instruction has no destination | OCInvoke, OCJALR, OCReturn |
+| `rs2` field nonzero where the slot is pinned to zero | CapQuery, CSealEntry, OCReturn, ODT-Destroy, ODT-PageOut |
+
+**Why these bits exist is the reason to enforce them, and it is not "because Sail does".** The
+capability register file has SIXTEEN entries, so every capability operand is a 4-bit field with a
+hardwired zero above it inside a 5-bit RISC-V register slot. **That spare bit is the extension
+budget.** Ignored, `cseal c2, c1, c17` silently uses `c1` as the sealing AUTHORITY here while a
+32-register successor would use `c17` -- **register-index aliasing, and in a capability machine
+aliasing a register means using the wrong authority.** Enforcing it now means no binary can ever come
+to depend on the bit being ignored. Not an escalation today, for the same reason R30 is not.
+
+**Derived, not guessed.** Every encdec clause in the four Veda opcodes was parsed and its field roles
+extracted -- which operands are 4-bit vcap, which are plain 5-bit GPRs, which slots are pinned to
+zero. **The seven ODT instructions came out with ALL-GPR operands and therefore no reserved bits at
+all**, which is exactly the distinction that would have broken them had the terms been applied
+uniformly. 26 decodes narrowed, zero ODT decodes touched.
+
+**No new trap source was needed.** Narrowing the decode makes `$veda_decoded` false, so
+`$veda_undef_encoding` fires and the existing umbrella supplies the cause and mtval. The previous
+increment's infrastructure does the work.
+
+Blast radius measured before the first edit: all **203** test sources across both corpora and the
+probes, scanned against the same derived table -- **not one sets a reserved bit.**
+
+**And the mutation pass caught a vacuous phase in my own probe.** Forcing `$veda_resv_rd_zero` true
+SURVIVED the count-only version, because `c1` is not a sentry: the OCReturn would decode and then
+fail its own checks, trapping either way with an identical count. **Recording mcause separates them**
+-- 0x02 for an unallocated encoding, 0x18 for one that decoded and then failed -- and with that the
+mutant dies on word 14. Five predicates, five mutants, all killed. Same lesson the census taught: a
+phase can pass for the wrong reason on one axis while looking right on another.
+
+**STILL OPEN: the base ISA's own decode**, where `mul` retires `x3 = 0` and `ebreak` does nothing.
+That is a larger surface than Veda's and is its own increment. One thing is already known about it
+and is worth recording here, because it is a trap: **R30's checkable rule does not transfer.** "Every
+name in the decoded set must be a comparison against `$opcode`/`$funct3`/`$funct7`, never an OR" is
+sound in Veda's space because every umbrella there is literally an OR. In the base ISA `$is_load`,
+`$is_store`, `$is_jalr` and `$is_fence` are each a plain comparison against `$opcode` alone -- they
+are **umbrellas that look like terminals**, and listing them would re-open the whole space.
 
 ### R32. The CSR address space is a second fail-open surface, and the encoding catch-all cannot reach it
 
