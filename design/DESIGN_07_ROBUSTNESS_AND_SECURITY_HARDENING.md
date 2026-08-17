@@ -794,6 +794,101 @@ Verification: six RTL mutants (one per chain) now all killed by this test, censu
 mutants killed. The Sail NMC mutant was killed by **this test alone**, so that path's generation
 check was unverified on the Sail side too. Pristine restored and rebuilt on both layers.
 
+### R34. The boot context has ambient authority -- ACCEPTED as architecture, with the scope corrected
+
+**Status: MEASURED AND ACCEPTED. No change made to the purecap gate, and the reason is recorded so it
+is not re-proposed. One real defect was found while investigating it -- R35, below.**
+
+Measured on BOTH layers and in agreement, so this documents architecture rather than a divergence
+(`difftest/probes/p12_ambient_boot.S`). From the reset context an ordinary `sd`:
+
+| | |
+|---|---|
+| writes a **copy-on-write** object | the COW fault never fires |
+| writes **past** the object Length | lands |
+| writes a **load-only** object | lands |
+| **destroys a capability tag** | silently |
+| traps taken | **zero** |
+| *control:* the same write through the capability path | **traps** |
+
+**The scope is narrower than "purecap is off", and that is the useful part.**
+
+    $veda_purecap_violation = ($is_load || $is_store) &&
+                              ($veda_mode[0] || ($veda_pcc_length != UNBOUNDED))
+
+The second disjunct means **every bounded-PCC context -- every compartment -- already refuses ordinary
+memory access regardless of the mode bit.** This is precisely the unbounded boot context: the one
+context whose authority nothing derived. And fetch is the same shape -- `$veda_pcc_violation` also
+keys on `pcc_length != UNBOUNDED`, so at reset instruction fetch is unchecked too.
+
+**MY OWN PROPOSAL WAS REFUTED, and recording why is the point of this entry.** I argued that in an
+address-less machine the primordial authority is not *addressing* but *naming*, that the ODA already
+is that root, and that the fix was to mint a root ODA at reset and delete the
+`cur_privilege == Machine |` disjunct. Three independent findings killed it:
+
+1. **It denies nothing.** With the root minted at reset, the set of principals that can mutate the ODT
+   is *identical* before and after. It is a change of provenance, not of extent -- and it recreates
+   exactly the emptiness that correctly killed the purecap latch: an authority gate whose authority no
+   reachable context lacks denies nothing. Four existing tests that prove the gate exists
+   (`vc_umode_compartment_basic.S`, `veda_smoke_m4_neg.S`, `veda_smoke_m11_neg.S`,
+   `veda_smoke_paging_refusals_neg.S` part D) would have had nothing left to prove.
+2. **It does not touch the finding it is named after.** R34 is the purecap gate on ordinary load/store;
+   the proposal modifies neither line. After it lands, every measured bypass above still happens.
+3. **It would make things worse.** `OSpecialRW` is Machine-gated on both layers, so a U-mode
+   compartment would *inherit* the root ODA through OCInvoke and **never be able to shed it**.
+
+Removing the disjunct alone is not an option either: verified by provenance, `veda_oda_tag` resets
+false, the only writer is `OSpecialRW`, which needs a capability already carrying PERM_ACCESS_SYSTEM_
+REGISTERS, and the only way to set that bit in an ODT entry is the Populate the gate just closed.
+**The authority graph would have no root and the machine would brick.**
+
+**And the `Machine` disjunct is not a hole.** Untrusted code cannot reach Machine except by causing
+trusted code to run: Machine is set at reset, on trap delivery into `mtvec` (Machine-gated), and by
+`MRET` (itself Machine-guarded, target from `mstatus.MPP` which only Machine can write). The disjunct
+grants naming authority to precisely the code reset already trusts.
+
+**One recorded sentence is wrong and is corrected here.** R26 states Veda-Core has "no root-capability
+analogue". The model's own comment contradicts it: `veda_regs.sail:85` invokes the almighty-root
+convention as the stated model for `veda_pcc_length`'s unbounded reset. The gap R26 named does not
+exist in the form it named it.
+
+**What remains open is not this.** It is R7's already-adopted answer -- mint the first ODA inside a
+*measured boot ROM*, not at reset -- and the measured cost of closing the ambient path at all: the
+test **programs** barely use ordinary memory (9 of 99 Sail files, 7 of 94 RTL files), but **all 14
+differential probes do**, because the signature and `tohost` conventions are plain stores. The cost of
+purecap-at-reset is harness-shaped, not program-shaped, and that is a much better starting position
+than it appeared. Folded into R7.
+
+### R35. veda_attr had no privilege term -- an RTL-only authority grant, found while refuting R34
+
+**Status: FIXED AND VERIFIED. RTL 89/89, mutant killed.**
+
+Five compartment-state CSR write arms. R27 added `&& >>1$priv` to four of them. **`veda_attr` (0x7C4)
+sat between them and did not get it** -- I walked past it in that increment.
+
+Sail refuses the write: `csrPriv(0x7C4)` is bits [9:8] = `0b11`, Machine-only by the RISC-V
+convention, enforced by the generic `check_CSR_priv` before any Veda clause runs. So this was an
+**RTL-only authority grant**, the same shape as every other finding this session: a gate present on
+one layer, absent on the other, on a path that feeds authority.
+
+**What it granted, at its real size.** `veda_attr` supplies Length and Perms to Populate-Fast. It is
+not itself a mint. But a principal after `veda.droppriv` -- holding neither privilege nor a tagged ODA
+-- could **choose the Length and Perms of an object that a later privileged Populate-Fast will mint.**
+Control over the contents of someone else's mint, which on a machine whose thesis is derived authority
+is exactly the wrong direction. The test drives it with the worst case: unbounded Length plus
+Execute|Invoke.
+
+**Only the privilege term shipped, and the companion is REFUTED BY MEASUREMENT.** The obvious next
+step -- adding `$csr_is_veda_attr` to `$veda_csr_escape_violation` so a *compartment* cannot stage it
+either -- would break `veda_smoke_m14.S:66`, `veda_smoke_r11b_pin.S:127` and
+`veda_smoke_r11_crossing_neg.S:169`, all of which write 0x7C4 from **inside** a compartment with no
+`ocreturn` or trap in between. **They are not test bugs.** They are the documented return path: leaving
+a compartment needs a max-Length code object, so the compartment must be able to stage the descriptor
+that builds it. Blocking that would break the architecture's own way out.
+
+Measured before editing: **no test in the corpus writes 0x7C4 after `veda.droppriv`**, so the privilege
+half costs nothing.
+
 ### R30. The RTL executes encodings the architecture never allocated
 
 **Status: FIXED AND VERIFIED. RTL 88/88, Sail 99/99, and four differential probes flipped from
