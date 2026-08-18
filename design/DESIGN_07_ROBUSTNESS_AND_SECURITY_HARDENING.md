@@ -909,6 +909,147 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+## REGISTER INTEGRITY AUDIT -- the four numbers that had no entry, and why
+
+**Prompted by a direct question about the numbering, audited across all three repositories by
+enumerating every `R<n>` reference in every `.md`, `.tlv`, `.sail`, `.S`, `.sv`, `.sh` file and in
+every commit message, then differencing that against the `###` headings in this file.** Four numbers
+had no entry: **R18, R25, R27, R28**. Three of them are **shipped, verified hardware fixes**, and two
+of those are exploitable-class. **The record understated what this machine already defends against.**
+
+**THE THREE CAUSES ARE DISTINCT AND ALL REAL:**
+
+1. **Two numbering series ran in parallel.** RTL-side increments were numbered `RTL-1..RTL-18` while
+   findings were numbered `R1..`. **R18 landed as "RTL-16 (R18)"** and was recorded under the RTL
+   number, so it never got an `R` heading here.
+2. **Co-committed findings inherit the other one's entry.** **R28 shipped inside commit `dfd4ec6`,
+   "R26 + R28"**. R26 got the heading; R28 rode along in the same commit and in the same source
+   comment block, and was never lifted out.
+3. **One number was simply skipped.** **R25 appears NOWHERE** -- not in any document, any source file,
+   any test, or any commit message in any of the three repositories. It was never allocated.
+
+**THE LESSON, WHICH IS THE SAME ONE THIS FILE KEEPS LEARNING.** A record that is missing entries is
+not neutral: it made three real defences invisible, and it would have let a future reader conclude the
+bounds check had never been audited for wrap. The gaps are closed below, reconstructed from the
+primary records -- the source comments and the commits -- rather than from memory.
+
+### R18. The bounds check wrapped, and it was straightforwardly exploitable
+
+**Status: FIXED AND VERIFIED, long since. Shipped as "RTL-16 (R18)" in commit `4433e87`, live at
+`veda_core.tlv:3441` and `:3501`, with its own negative test `veda_smoke_bounds_wrap_neg.S` in the
+passing corpus. Back-filled here because it had no entry.**
+
+The bounds addition was **64 bits wide on both sides**, and the offset is a full, attacker-chosen
+64-bit GPR. **`offset = 0xFFFFFFFFFFFFFFF8` makes `offset + 8` wrap to 0**, so `0 <= Length` passes --
+and the address computation is a modular 64-bit add too, so it lands at **`Base - 8`**. Every other
+term of the violation is satisfied by a perfectly ordinary capability: tagged, in-generation,
+unsealed, permitted, resident. **The access retires with no trap, reading and WRITING the eight bytes
+immediately below the object** -- in a packed allocator, the tail of the neighbouring object.
+
+**SAIL COULD NOT EXPRESS THE BUG.** Its `unsigned()` yields an arbitrary-precision integer, so
+`unsigned(offset) + width` cannot wrap. **The model was right and the hardware was wrong** -- and this
+is the shape of divergence a differential harness finds only if a probe happens to enter the state.
+
+The fix does the arithmetic one bit wider than the widest operand, so the carry has somewhere to go:
+`2^64-1 + 16` needs 65 bits, and at 65 bits the sum is far larger than any 40-bit `Length`.
+**Widening the COMPARE is what matters** -- clamping the offset instead would silently alias a huge
+offset onto a legal one, which is the same bug wearing a hat.
+
+### R27. The weaker gate was on the stronger authority
+
+**Status: FIXED AND VERIFIED. Shipped in commit `949c937`, live at `veda_core.tlv:5327`, with its own
+test `veda_smoke_r27_csr_priv.S`. Referenced four times in this document and never given a heading.
+Back-filled.**
+
+Milestone 20 gated five compartment-state CSRs together, so a compartment could not rewrite its own
+execution bounds or forge its own trap return -- **but only 0x7C5 ever got the privilege term.** The
+four that rewrite PCC and MEPCC directly carried the PCC-bounds half alone. **The weaker gate was on
+the stronger authority.**
+
+It is also what turned R26 from a partial escape into a complete one: once the "am I in a compartment"
+predicate is forged by entering on a sentinel-Length object, **these** are the CSRs that let the
+compartment widen its own PCC and fetch anywhere. R27 does not close R26 -- only explicit compartment
+state does -- but it means forging the predicate stopped being sufficient on its own.
+
+**AND R39 LATER CORRECTED R27's OWN PREMISE.** R27 gated the write-enable rather than trapping, "to
+match Sail". That matched Sail's inner `write_CSR` clause and missed the generic `check_CSR_priv` that
+runs above it, which traps. The four arms remain as defence in depth and the generic check is now the
+real gate -- see R39.
+
+### R28. The escape violation trapped, and the write landed anyway
+
+**Status: FIXED AND VERIFIED. Shipped inside commit `dfd4ec6` ("R26 + R28"), live at
+`veda_core.tlv:5346`. It inherited R26's entry and never got its own. Back-filled.**
+
+`$veda_csr_escape_violation` already listed all six CSRs and **correctly raised a trap.** But **only
+one of the five write-enables -- `veda_mode` -- ever consulted it.** For 0x7C0-0x7C3 the trap fired
+**and the register changed**: a compartment could rewrite its own PCC bounds or forge its trap return,
+take the trap, and **keep the write**.
+
+Sail is fail-closed here by construction -- `write_CSR` returns `Err(())` before any assignment, so
+nothing is written. An RTL-only divergence, and **the same fail-open shape as R21: the refusal was
+raised and the effect happened anyway.**
+
+**FOUND BY THE R26 AUTHORITY TEST, not by reading.** From inside a sentinel-Length compartment the
+`mtvec` write was refused while the 0x7C3 write landed -- which is only possible if the two are gated
+differently. And it was **"applied to four of five arms" for the fourth time in this project**, the
+first time in code nobody had just edited.
+
+### R25. Never allocated
+
+**Status: NOT A FINDING. Recorded so that nobody spends time looking for it.** `R25` appears zero
+times in every document, source file, test and commit message across `veda-core`, `veda-core-sindhu`
+and `veda-core-sail-riscv`. The number was skipped.
+
+### R42. GLOBAL and STORE_LOCAL_CAPABILITY need a local-vs-global notion first
+
+**Status: RECORDED, NOT YET MEASURED. Split out of R40, which closed 0x14 and 0x15 and deliberately
+left these two. Entered here rather than living only in a task list, because a task list does not
+survive and this document does.**
+
+Perms bit 0 GLOBAL and bit 6 STORE_LOCAL_CAPABILITY, and their causes 0x10 and 0x16, are allocated and
+enforced by neither layer. `VEDA_CORE_SPEC.md` now reads **"Allocated, NOT enforced"** for both.
+
+They are not two more arms in the dereference chain. The rule is that a capability lacking GLOBAL is
+*local* and may only be stored into memory through a capability granting STORE_LOCAL_CAPABILITY, and
+its purpose is **temporal safety** -- stopping a short-lived reference from outliving its frame by
+being written somewhere durable. Building it needs a decision on what "local" even means in an
+object-centric, address-less machine with no stack in the usual sense but with an SSC and a per-domain
+CRF; on who mints local capabilities and at which instruction; on whether OCInvoke and OCReturn should
+mint or strip GLOBAL at a domain crossing; and on the fact that **STORE_LOCAL_CAPABILITY is checked on
+the AUTHORISING capability while GLOBAL is checked on the capability BEING STORED** -- which would be
+the first check in this machine reading permissions from two different capabilities at once. Weigh it
+against the existing sealed/OCInvoke machinery first: some of what GLOBAL buys may already be reachable
+through `otype` sealing plus the region/domain gate.
+
+### R43. Rebind does not check that the register it refreshes names the same object
+
+**Status: RECORDED, NOT YET MEASURED. Found while refuting a proposed R38(b) closure. Not an
+escalation today, and entered now precisely so it is not discovered as one later.**
+
+`VEDA_CORE_SPEC.md` §4 defines Rebind as refreshing **"an ALREADY-BOUND capability register's"**
+`Base`/`Length`/`Perms`/`otype`/generation from the ODT, leaving `Offset` unchanged. The
+implementation does not enforce "already-bound": it does **not** check `CTag(rd)`, so an untagged
+register works; it does **not** check `cur.Object_ID == object_id`, because the Object_ID comes from a
+GPR; it reads the current register only for `isSealedCap` and `Offset`; and then it writes
+`wCTag(rd, true)`. **Preserving an `Offset` that was meaningful in object A and applying it to object
+B is incoherent with the instruction's own stated purpose.**
+
+**NOT AN ESCALATION TODAY**, because Rebind re-derives `Perms` from the entry and sits behind the same
+`veda_bind_domain_ok` gate as Bind -- it grants no more than a plain Bind of the same name would. **It
+becomes one the moment anybody makes Rebind preserve the holder's own `Perms`**, which is exactly the
+R38(b) closure that was refuted: hold a full-permission capability to A, Rebind against B, keep A's
+permissions on B's bounds.
+
+**THE CORPUS DEPENDS ON THE LOOSE FORM**, which is why this is a decision and not a free tightening:
+`veda_smoke_residency.S:93` rebinds into c5 *"UNTOUCHED SINCE RESET"*, and `veda_smoke_m12.S:56`
+rebinds c2 against a different object to exercise the owner gate.
+
+**DECIDE**: either narrow Rebind to a genuine refresh -- require the tag and the Object_ID match,
+update those tests, and then Perms-from-register becomes safe and closes half the ADVISORY escape --
+or amend §4 so the specification stops describing a precondition the hardware does not enforce.
+Leaving the two disagreeing is the defect class R40 just closed in the cause table.
+
 ### R38(b) RESOLVED. A copy-on-write object is not pageable, and the recovery that looked available was unsafe
 
 **Status: FIXED AND VERIFIED ON BOTH LAYERS. Sail 102/102, RTL 90/90, ACT4 51/51, differential 20/20.
