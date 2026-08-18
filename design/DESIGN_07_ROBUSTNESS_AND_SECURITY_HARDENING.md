@@ -4177,6 +4177,19 @@ a field wider than `owner_domain`'s 20 bits to hold a 44-bit identity, and that 
 decision. `sail_tests/pending/vc_r52_bind_by_name_neg.S` is **still red on purpose** and now waits on
 exactly that, with its README saying so.
 
+**AND THE MIRROR HAD A BUG THAT WAS ACCIDENTALLY CORRECT, which is why it is recorded rather than
+quietly amended.** The RTL arm was first written `($veda_pcc_object == 44'b0) ? VEDA_DOMAIN_ANY : ...`
+-- testing the sentinel against **zero**. `VEDA_OBJECT_NONE` is `44'hFFFFFFFFFFF`, all ones. The wrong
+test still produced the right answer in every existing test, **by coincidence**: the all-ones
+sentinel's top 20 bits are exactly `VEDA_DOMAIN_ANY`, so the else-branch returned the value the
+then-branch was supposed to. It diverged from Sail for exactly one input the coincidence does not
+cover -- a compartment whose code object is Object_ID `{region 0, local 0}`, a perfectly legal id --
+where the RTL would have written `ANY` (**fail-open**) while Sail wrote domain 0.
+
+**No test in the corpus could have caught it**, and it was found by checking the sentinel's value at
+source rather than assuming it. A mirror that is right by coincidence is the same hazard as a green
+test that measures nothing, one layer down.
+
 ---
 
 **The original finding, kept because it is what forced the decision:**
