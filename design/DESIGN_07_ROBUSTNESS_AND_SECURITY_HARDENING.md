@@ -3982,13 +3982,34 @@ Found by writing the R48 differential probe and then **reading its signature ins
 verdict**. `p21_oda_crossing.S` reported **AGREE** -- and both layers had written **eight zero words.**
 Neither ever reached its stores.
 
-**Why.** `VEDA_OCINVOKE` requires the target domain's region to be RT-resident (R10). The region table
-is written by **exactly one thing in the entire model: `veda_test_seed_odt()`, the test fixture
-function.** There is no RT-Populate instruction -- `DESIGN_08`'s region mechanism has **no
-software-visible write path at all**, a gap the RTL mirror's own results doc named and did not build.
-The differential harness deliberately runs with `test_fixtures = false` (R24, so the suites and the
-harness cannot share a drift channel), so **no region is ever valid or resident there, and every
-OCInvoke REGION_FAULTs.**
+**Why -- AND THIS EXPLANATION WAS WRONG. The correction matters more than the finding did.**
+
+The paragraph first written here said: *"the region table is written by exactly one thing in the
+entire model, `veda_test_seed_odt()`, the test fixture function... the differential harness runs with
+`test_fixtures = false`, so no region is ever valid or resident there, and every OCInvoke
+REGION_FAULTs."*
+
+**`test_fixtures = false` does not disable region seeding.** The region writes are at
+`veda_regs.sail:1231-1242`; the `if veda_test_fixtures then {` guard does not open until **:1530**,
+*after* them -- and the file states the scope itself: the switch covers the **capability register**
+seeding, and *"the ODT seeding above is left alone -- that is a separate question and a separate
+increment."* Regions 0 and 1 are valid and resident in the differential harness, as everywhere else.
+
+**The real cause was one immediate in my own probe.** `callee_entry` lands at `0x8000010c`, the code
+object declared `Length 0x40`, and the compartment's terminating `ecall` sits at `0x8000014c` --
+**exactly one word past the end of the PCC window `OCInvoke` installs.** It could never be fetched,
+so the probe never reached its stores. Its sibling `vc_r10_crbr_invoke_trap_return.S` sizes its
+compartment `0x200` and says why. **Corrected to `0x200`, `p21_oda_crossing.S` runs, agrees on all
+seven words, and is back in `probes/`. `difftest/blocked/` is empty and gone.**
+
+**What survives, exactly.** There is still no RT-write instruction, and RTL-5's mutant **M3 survives
+for want of one** -- that part was and is true. And the compartment crossing really had never been
+differentially tested. But that was true for the mundane reason that **nobody had written a probe
+that crossed**, not for the architectural reason recorded beside it.
+
+> **A finding whose headline is right and whose stated cause is wrong is worse than no finding**,
+> because the stated cause is what the next increment gets scheduled against. This one nearly bought
+> a new instruction.
 
 **The consequence is bigger than the probe.** `p21` is the **first probe in the suite's history to
 attempt an OCInvoke** -- verified by grepping every probe for the encoding. **The architecture's
@@ -4207,6 +4228,95 @@ takes an exclusive lock and **refuses to start** while another run holds it, nam
 (*"while a sweep runs, that tree is not a source of truth for any reader"*) applied from the
 writer's side and violated by me. A measurement taken while another process is mutating the same
 tree is not a measurement. The lock makes that unavailable rather than merely discouraged.
+
+### R55. veda.bind minted a capability out of a region that had never been configured
+
+**Status: MEASURED, THEN FIXED AND VERIFIED. A Sail-only divergence in which the SPECIFICATION was
+more permissive than the hardware -- the worse direction on a Sail-first project.**
+
+The model carries **two** region-residency predicates, and they did not agree:
+
+```
+veda_region_rt_resident(r) = rt_valid & region_resident      <- OCInvoke, OCReturn
+veda_region_is_resident(r) =            region_resident      <- veda.bind
+```
+
+The comment on the first one says `rt_valid` *"gains its first-ever consumer here: a slot that has
+never been configured must fail closed even if its resident bit were somehow set."* **It gained that
+consumer at the crossings and not on the minting path** -- and minting is where a missing gate turns
+into a capability.
+
+**Region 3 is R10's own gate fixture**, `{rt_valid = false, region_resident = true}`, built precisely
+to catch this. Measured, with its control:
+
+| | traps | tag |
+|---|---|---|
+| bind into region 3 `{rt_valid=0, resident=1}` | **0** | **1 -- minted** |
+| control: bind into region 2 `{rt_valid=1, resident=0}` | 1 | 0 -- refused |
+
+So the predicate consulted `region_resident` and not `rt_valid`.
+
+**THE RTL WAS ALREADY RIGHT.** `$veda_region_resident` reads `rt_valid[..] && rt_resident[..]`. Closed
+in the RTL's direction, which is also what the architecture's own comment says it intends.
+
+**THREE OF MY OWN MEASUREMENTS OF THIS WERE VACUOUS BEFORE ONE WAS SOUND, and each was caught by a
+control rather than by inspection.** The first read `cgettag` on `c10`/`c11` -- **the fixture seeds
+`c10..c14`** -- so it measured the seed and reported both the finding and its control as tag 1. The
+second lacked per-step trap counts, so a refusal that trapped was indistinguishable from a soft-fail.
+The third asserted **zero** traps for the refusals, when a region fault is a **hard trap for every
+bind mode including `.notrap`**, which the source states outright. The shipped test therefore counts
+traps exactly at four points and carries four controls, including the one that matters most: **a bind
+into a properly configured resident region must still SUCCEED**, or a machine that refused every
+cross-region bind would pass the whole file.
+
+### R56. RT-Populate: DECIDED AGAINST as the next increment, and the reasons are worth more than the instruction
+
+**Status: DESIGNED, ADVERSARIALLY REFUTED, NOT BUILT. Two of the three justifications for it turned
+out to be false at source, and the third is defence-in-depth.**
+
+The case for an RT-Populate was: (i) R51 said the differential harness has no resident region;
+(ii) R52's policy is inert because everything is region 0; (iii) RTL-5's mutant M3 survives for want
+of an RT-write. **(i) is false** -- see R51's correction above. **(ii) does not follow**: RT-Populate
+would multiply domains from 2 to 8 and **not move the bind gate's comparison by one bit**; R52's
+prerequisite is re-graining the subject from region to object, which no new instruction supplies.
+**(iii) is real and non-substitutable** -- and by its own author's words it is defence-in-depth, and a
+**create-only** RT-Populate would not kill M3 anyway, because M3 needs *revocation*.
+
+**AND THE MINIMAL VERSION IS A COMPARTMENT ESCAPE ON ITS FIRST EXECUTION.** Verified on both layers:
+
+```
+empty_region_entry.region_odt_base = zeros()        installed into regions 4..7
+region 0's region_odt_base         = zeros()        <- the same value
+RTL: the reset loop sets rt_odt_base[r] = 32'b0 for all, and rt_odt_base[0] = 32'd0
+```
+
+**Four regions already alias region 0's entire descriptor namespace at reset**, and the only thing
+between a foreign compartment and every unnarrowed descriptor in region 0 is one bit --
+`rt_resident[4] == false`. Setting that bit is exactly what an RT-Populate does. **"No base operand"
+and "derived base" are different designs, and only the second is sound.**
+
+**THE REGION LAYOUT IS DISJOINT ONLY BECAUSE THE MODEL TRUNCATES.** `region_entry` holds
+`rt_valid, region_odt_base, region_resident, region_backing, region_generation` -- and **no length**.
+A region's extent is unbounded by construction; the index is `region_odt_base + local`. Exact
+constants: `VEDA_LOCAL_MODELED = 2^20` (a **modeling** bound enforced by `veda_odt_index`'s
+`lu >= VEDA_LOCAL_MODELED -> None()` guard), fixture bases `0, 2^20, 2^21`. Under the model each
+region spans exactly `2^20` and the three are exactly disjoint. **At the architected 24-bit local
+width they are not** -- region 0 would span `[0, 2^24)` and swallow region 1's base entirely. **The
+shipped layout is safe because of a modeling artifact, not an architectural invariant.**
+
+So if RT-Populate is ever built: the base must be **derived, never defaulted and never
+caller-chosen** (R10 makes the region field the unforgeable domain identity, so choosing it is
+forging a domain), `region_entry` needs a **length** or a fixed stride, and the containment
+arithmetic must be computed wider than its operands -- **R18 for the fifth time**. The region table
+is 8 entries, so unlike the ODT's `2^23` an all-pairs disjointness check **is** a real hardware
+operation here.
+
+**The precedent supports the static reading.** seL4's `KernelNumDomains` is a compile-time constant
+and the only runtime authority moves a thread between existing domains; CHERIoT's compartments are
+established by a loader that then erases its own authority. A machine whose domains are fixed at load
+time is a shipped architecture, not an unfinished one -- so the reset seeding is a **legitimate loader
+stand-in**, and this project already recorded that as a deliberate scope decision when it left the
+ODT seeding outside the fixture switch.
 
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 

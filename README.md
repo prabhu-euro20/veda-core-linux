@@ -9,15 +9,15 @@ Single Address Space, Deterministic. Implementation repos cite these docs, never
 capability-format respec and the object-namespace scale decision are built and checked, not
 proposals-only:
 
-- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **106/106**
+- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **107/107**
   self-check (256-bit format, widened ODT entry + generation, the DESIGN_08 region table, the R10
   CRBR hardening, and all of Phase 2 -- object residency, the page-out/page-in pair and
   copy-on-write), every increment mutation-tested.
 - **RTL (hardware)** -- `veda-core-sindhu`, branch `sindhu`: **98/98** smoke tests, mirroring the
-  Sail model through the Phase-2 increments and the R36..R54 hardening.
+  Sail model through the Phase-2 increments and the R36..R56 hardening.
 - **Conformance** -- RISC-V International ACT4 RV64I: **51/51**.
-- **Cross-layer differential** -- twenty-four probes run the same program on both layers and compare
-  signatures word for word: **24/24 as expected**. This is the suite that finds what neither layer
+- **Cross-layer differential** -- twenty-five probes run the same program on both layers and compare
+  signatures word for word: **25/25 as expected**. This is the suite that finds what neither layer
   can find alone.
 
 **Reproduce all four with one command**: `veda-core/verification.sh` in the implementation repo. It
