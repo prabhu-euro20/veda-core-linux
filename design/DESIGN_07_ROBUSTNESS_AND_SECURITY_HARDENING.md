@@ -3666,6 +3666,152 @@ rather than a rider on R11.
   reproduction takes both traps from the handler's own context.
 - The RTL mirror was not inspected for this. The Sail model is where it was found.
 
+### R46. The verification entry point could not fail, and the cross-layer differential suite had not run
+
+**Status: MEASURED, THEN FIXED AND VERIFIED. Found while establishing a baseline before R47, which
+is the only reason it was found at all.**
+
+`./verification.sh` printed three green numbers, a fourth line reading `Cross-layer diff : 0/21 as
+expected`, and **exited 0**. The 21 differential probes had not run.
+
+**R46(a) -- the harness took its toolchain from the caller's shell.** `difftest/rundiff.sh` invoked
+`iverilog` off ambient `PATH`. Both of its siblings do not: `rtl/run_veda_smoke_test.sh` and
+`run_security_trap.sh` each self-activate conda when it is missing. So the **only suite that compares
+the two layers against each other** ran only when a human had already activated conda by hand, and
+returned `IVERILOG-FAIL` / exit 2 on every probe otherwise. That file is meticulously hardened
+against every *other* staleness channel -- it refuses to run against a `veda_core.sv` older than
+`veda_core.tlv`, it rebuilds `sim_diff.vvp` every run because a committed binary once let it compare
+two vintages, and R29 stopped it reaching into the frozen `rva23-core` tree for the assembler. It
+then hardwired `SIM=` and `RTLSIM=` to absolute paths **three lines below its own comment** saying
+paths are resolved from the file's location. Both are resolved now too: a second clone measured the
+first clone's simulator and RTL.
+
+**R46(b) -- the aggregator discarded every verdict.** `verification.sh` captured each suite's output
+into a variable and never read an exit code. `run_difftests.sh` **does** exit 1 on mismatch; that
+answer went nowhere. This is the same defect `rundiff.sh` has a comment about one level down --
+*"a comparator that cannot fail"* -- reappearing in the layer above it.
+
+Fixed the same way, **the exit code is the verdict**, plus a second guard the exit code cannot give:
+every suite must report a **nonzero total**. A suite that dies before running anything can still exit
+0, and `0 programs run` reads as a clean line rather than an outage.
+
+**The lesson is not about conda.** A green summary is a claim, and this one was assembled from four
+numbers scraped out of text with no failure path. Every result this project has published since the
+differential suite was added was produced by a human who happened to have the right shell.
+
+### R47 (flagship-adjacent). The ODA is a capability whose window neither layer ever read
+
+**Status: MEASURED, THEN FIXED AND VERIFIED ON BOTH LAYERS. Sail 104/104, RTL 90/90, ACT4 51/51,
+differential 22/22. The measurement was a shipped test that had been passing for eleven milestones.**
+
+`veda_oda_authorized()` is the whole of the delegated authority to write the Object Descriptor
+Table, and it is **three terms wide** -- identically on both layers:
+
+```
+Sail  veda_ocl_insts.sail   veda_oda_tag & not(isSealedCap(veda_oda))
+                            & permBit(veda_oda.Perms, PERM_ACCESS_SYSTEM_REGISTERS)
+RTL   veda_core.tlv         $veda_oda_tag && !$veda_oda_sealed && $veda_oda_perms[7]
+```
+
+Tag, otype, one permission bit. **`Base`, `Length`, `Offset` and `Object_ID` -- 196 of the ODA's 256
+bits -- were consulted by NONE of the seven instructions this predicate authorizes.** They were
+registered, maintained across every OSpecialRW, preserved across every trap, and read by nothing.
+
+So delegated ODT-write authority was a **bearer token over all of memory**: any holder of any ODA
+could mint a descriptor naming any Base, any Length and any Perms, Bind it, and dereference it. That
+is the entire memory-safety claim, handed away by the one register this design made a capability
+*specifically* so that it could carry a window -- `veda_regs.sail` says so in as many words: the ODA
+*"must carry Base/Length/Perms/Tag, none of which a 64-bit CSR can hold."* **The design stated the
+window and the implementation never read it.**
+
+**THE MEASUREMENT WAS ALREADY IN THE SUITE, GREEN.** `rtl/sim/veda_smoke_m11.S` mints authority
+object 40 at Base `0x80011000` Length `0x40`, installs it as the ODA, drops to User, and from User
+mints object 41 at Base `0x80012000` -- **four kilobytes outside its own authority's window** -- with
+`Perms 0x0300`, then Binds it and reads back its Base as proof. Its own comment calls that *"the real
+proof"* the ODA path works. It is exactly that. It is **also** the escape, and by passing it pinned
+the escape as the contract. That is the sixth time on this project a green test has named a weakness
+and then frozen it: **counting a refusal is not checking it, and neither is counting a success.**
+
+Reproduced independently first, on the specification layer, in `sail_tests/vc_r47_oda_scope_neg.S`:
+trap count **0** where the architecture owes 1.
+
+**THE RULE ADOPTED, uniform across all seven ODA-gated instructions.** On the **delegated path only**,
+the memory a descriptor names must lie inside the ODA's window -- **both what the entry names now and
+what it will name after**. Machine privilege is deliberately untouched: it takes the other half of the
+`Machine | oda_authorized()` OR, needs no ODA, and already owns the machine, so scoping it would be
+theatre. **Delegation is the thing that must be narrower than the delegator.**
+
+| instruction | old window | new window |
+|---|---|---|
+| Populate, Populate-Fast | if `valid` | yes |
+| Destroy | **always** | -- |
+| set.cow, set.domain, page-out | yes | -- |
+| page-in | yes | yes |
+
+Three of those cells were forced by an attack rather than chosen:
+
+- **Populate's old window.** Without it a delegated actor hijacks *any* descriptor in the machine by
+  aiming its new Base into its own window -- the repopulate bumps the victim's generation, killing
+  every capability its real owner holds, and repoints it. Gating the old half on `valid` is
+  **required**, not cosmetic: a free slot reads `Base 0, Length 0`, and an ungated test would make
+  every unused slot unmintable by any ODA that does not cover address zero, deleting the mechanism
+  rather than scoping it.
+- **Destroy's ungated old window.** Destroy bumps the generation of an *invalid* slot too and can
+  retire it permanently, so an unscoped delegate could burn the 24-bit temporal-safety counter of
+  every object in the machine. This is the one cell that deliberately does **not** gate on `valid`.
+- **Page-in's new window.** It is the only instruction that *chooses where an object lands*. Without
+  the new half a delegated actor pages a foreign object into its own window and owns it outright.
+
+**WIDTH IS THE R18 LESSON, NOT A STYLE CHOICE.** `Base` is 56 bits and `Length` is 40, so
+`Base + Length` fits neither -- a containment test computed at the operands' own width wraps and
+reports the whole machine as contained. Sail computes over unbounded `int`; the RTL uses 57-bit
+comparators, the same width R45's pin uses, for the same reason.
+`vc_r47_oda_scope_neg.S` ATTACK 3 drives it with a saturating `veda_attr` Length -- reachable from
+User precisely because Populate-Fast reads `veda_attr` as an internal register rather than through a
+CSR access, so User consumes a value it could never have written.
+
+**THE REFUSAL IS `Illegal_Instruction`, AND THAT IS A SECURITY DECISION, NOT A CONVENTION.** It
+matches all seven sibling refusals on these instructions -- and a distinct cause code would let
+unprivileged code **binary-search its own ODA's window by trap cause**. That is the oracle shape D-7
+found on `owner_domain` in the R1 design pass, arriving on a different field.
+
+**MY OWN TEST FELL INTO THE TRAP THIS FINDING IS ABOUT.** Its first draft wrote `veda.odt.destroy` as
+an I-type encoding. That is not Destroy -- it is an encoding the architecture never allocated, so the
+attack "passed" by being refused by **R30's undefined-encoding trap**, proving nothing about R47.
+What caught it was the **over-refusal control demanding the same instruction succeed one line later**.
+Every negative in that file now has one.
+
+#### Open halves, stated rather than left to be discovered
+
+- **The ODA is one global register, and only Machine can install one.** `VEDA_OSPECIALRW` is
+  Machine-only for read *and* write, so a delegated allocator gets exactly one window and cannot
+  narrow its own authority further. There is no monotone self-attenuation for the ODA the way
+  CSetBounds/CAndPerm give one for ordinary capabilities. That asymmetry is now the interesting
+  design question, and it did not exist while the window was inert.
+- **The ODA survives compartment crossings.** `veda_regs.sail` records that ODA and TSC are
+  deliberately *not* cleared by OCInvoke/OCReturn (the SSC comment states this as the contrast that
+  motivated SSC's own clearing). So a compartment invoked while an allocator's ODA is live inherits
+  its mint authority. Scoping the window bounds the damage to that window; it does not end the
+  inheritance.
+
+#### What this does to R1 (SLAB-CARVE), and it changes the question again
+
+The R1 design pass concluded with two shapes: **Variant C**, a new carve instruction, and **Variant
+S**, deletion-shaped -- *"add P2-style containment to Populate/Populate-Fast against a range the
+authority holds, and scope the ODA"* -- which it could not recommend because *"it needs an ODA-scoping
+design that does not exist."*
+
+**It exists now, and it is built and verified on both layers.** With Populate contained inside the
+minter's own window, *carving a child inside a parent arena is what Populate already does*: hold an
+ODA whose window **is** the arena, and mint children inside it. The synthesis pass's P2 (containment
+against the authority's window) and P6 (child IDs derived, never GPR-supplied) were the two
+load-bearing halves; **P2 is now shipped hardware**, and the "carve-only parent Permit" that pass
+refuted (D4) is unnecessary for a reason it did not reach: the authority to mint is a **separate
+capability**, not a permission bit on the arena capability, so it needs no split.
+
+What R1 still owes is the **namespace** half -- per-element Object_IDs and where they come from --
+not the **authority** half. That is a strictly smaller question than the one the design pass faced.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**

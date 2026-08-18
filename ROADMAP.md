@@ -347,7 +347,15 @@ gate -- "Sail residency/COW corpus (positive + negative + mutation), then RTL mi
 
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
-cross-layer differential suite. As of 2026-08-18: **102/102, 90/90, 51/51, 20/20.**
+cross-layer differential suite. As of 2026-08-18: **104/104, 90/90, 51/51, 22/22**, and it now ends
+with an explicit verdict line.
+
+**Read that command's history before trusting any earlier number.** Until R46 it **could not fail**:
+it captured each suite's output into a variable and never read an exit code. It was measured exiting
+0 while printing `Cross-layer diff : 0/21 as expected` -- the 21 differential probes had not run at
+all, because `difftest/rundiff.sh` took `iverilog` from the caller's ambient `PATH` while both of its
+sibling runners self-activate conda. The exit code is now the verdict, plus a guard the exit code
+cannot give: every suite must report a **nonzero total**.
 
 ## Immediate next actions (in order)
 
@@ -359,6 +367,12 @@ cross-layer differential suite. As of 2026-08-18: **102/102, 90/90, 51/51, 20/20
 3. **Phase 1 Sail work begins** in a `Veda-Core-sail-riscv` branch: veda_types.sail respec
    behind a build-time switch (256-bit format + CAndPerm + R1 carve mode + Rev-A epoch
    vector), self-check corpus re-pass.
+   **R47 changed what item 2 and the R1 carve mode owe.** The R1 design pass could not recommend its
+   deletion-shaped Variant S because *"it needs an ODA-scoping design that does not exist"*. It
+   exists now, built and verified on both layers: Populate is contained inside the minter's own
+   window, so carving a child inside a parent arena is what Populate already does -- hold an ODA
+   whose window **is** the arena. What R1 still owes is the **namespace** half (per-element
+   Object_IDs and where they come from), not the **authority** half. See DESIGN_07 R47.
 4. RTL `linux-core` clone is created only when Phase 1 Sail is green -- Sail-first, as always.
 
 ## Standing constraints (from the verified line's own docs)
