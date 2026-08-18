@@ -5157,6 +5157,127 @@ was believed**, per the R62 lesson.
   rewrite that object's policy. That is arguably R47's design rather than a defect -- but it is
   written down here so the next reader decides it deliberately rather than inheriting it.
 
+### R66. The retirement lands one Populate too late, and two incarnations share one generation
+
+**Status: MEASURED END TO END ON THE SHIPPED MODEL, THEN FIXED AND COVERED ON BOTH LAYERS. Found by
+a 32-agent stale-authority audit -- every authorization gate in the machine enumerated, then swept
+for values that can be stale at the moment the gate reads them. Two survivors; this is the first.
+A temporal-safety break, which is this architecture's central claim.
+Sail 116/116, RTL 105/105, ACT4 51/51, differential 25/25.**
+
+#### The one-instruction lag
+
+`retired` is computed from the **old** generation:
+
+```
+new_generation = if old.valid then (if old.generation == 0xffffff then 0xffffff else old.generation + 1)
+                 else old.generation
+new_retired    = old.valid & (old.generation == 0xffffff)
+```
+
+and the only gate is `if old_entry.retired then Illegal_Instruction()`, which also reads the **old**
+value. So from `{valid, 0xfffffe, retired false}`:
+
+1. **Populate #1** -- a legal increment. Writes `{valid, 0xffffff, retired STILL FALSE}`.
+2. **Bind** mints a capability carrying generation `0xffffff`.
+3. **Populate #2 at a different Base** -- the gate reads `retired = false` and **passes**. The bump
+   cannot run (saturating no-op), `retired` becomes true, **and the new incarnation is written in the
+   same instruction**.
+
+Two distinct incarnations now hold generation `0xffffff`, and the first one's capabilities are live.
+
+**The dereference does not catch it.** Its only temporal arm is
+`not(entry.valid) | entry.generation != cap.generation` -- `valid` is true and the generations match.
+The address is formed from the capability's **cached** `Base`, so the access lands on the abandoned
+frame. **`retired` is read by no dereference arm on either layer** -- its only consumers are the two
+Populate gates, write-backs, and pure carry-overs.
+
+#### Measured, by instruction trace, over the seeded `0xFFFFFE` fixture
+
+```
+[12] populate #1 at arena1              ->  accepted
+[15] bind, [20] ocs.d 0xABCD            ->  written into arena1
+[29] populate #2 at arena2              ->  ACCEPTED, no trap
+[33] ocl.d through the OLD capability   ->  0xABCD, read out of arena1
+```
+
+`arena2` stayed zero. After the fix the same binary shows `[29] populate -> [30] trap_handler+0`.
+
+#### The source already knew -- one instruction away
+
+Page-out's own comment describes this exact state and accepts this exact argument:
+
+> *"That state is genuinely reachable, not theoretical: a Destroy from 0xfffffe leaves generation
+> 0xffffff with retired STILL false (its retired rule tests the OLD generation), and a following
+> Populate is then permitted and leaves the slot valid, resident, saturated and un-retired. So
+> `retired` does not intercept it."*
+
+and names the consequence -- *"each would read and write the freed frame, now owned by another
+object. That is a full use-after-free"* -- and then **fails closed**, with the principle stated
+outright: *"if the invalidation mechanism cannot run, the operation that depends on it must not
+proceed. FAIL CLOSED."*
+
+**Populate depends on the bump to invalidate the previous incarnation, and had no such term.** The
+defence was written for the instruction that **observes** the state and not for the one that
+**creates** it. This is a new shape for the register: not a missing check, but a check placed on the
+wrong instruction while its own justification was written down correctly.
+
+`veda_types.sail` states the intent outright -- *"once generation WOULD WRAP, the slot is permanently
+retired instead."* The implementation retired exactly one Populate later than that sentence.
+
+#### The fix
+
+Both Populate clauses, both layers, refuse when the bump cannot deliver a fresh generation:
+`old_entry.retired | (old_entry.valid & old_entry.generation == 0xffffff)`. Populate #1 is still
+allowed -- `0xfffffe -> 0xffffff` is a genuine increment -- so the refusal lands exactly where the
+guarantee cannot be met and nowhere earlier.
+
+**The Destroy route is covered by the same term.** `Destroy` from `0xfffffe` leaves
+`{invalid, 0xffffff, retired false}`; the following Populate takes the `else old.generation` branch
+and is permitted, because `old.valid` is false -- correctly, since a capability from before the
+Destroy carries a generation `<= 0xfffffe` and already mismatches. The Populate **after** that one
+finds `{valid, 0xffffff}` and is refused. Both entry paths converge on one term.
+
+#### Why no existing test caught it
+
+`vc_gen_retire_neg.S` drives **two Destroys** -- its own comment says so -- and the RTL twin
+`veda_smoke_m16_neg` was re-aimed at the same route. **The Populate-over-a-valid-saturated-slot route
+is measured by no test on either layer.** The saturation mechanism had coverage; the instruction that
+can defeat it did not.
+
+#### Coverage
+
+`sail_tests/vc_r66_generation_collision_neg.S` and `rtl/sim/veda_smoke_r66_gen_collision.S` +
+testbench, over the seeded `0xFFFFFE` fixtures (Sail object 55, RTL entry 106 -- the layers seed
+different slots, as R59 also had to handle). Both carry three controls: Populate #1 must still be
+**accepted**, the bind must mint, and after the refusal the old capability must **still work** --
+so a fix that simply broke Populate near the ceiling cannot pass. The RTL half was shown to fail with
+the term stripped from a copy of the generated Verilog, and the strip was **asserted to have landed**
+before the run was believed.
+
+#### Standing, stated plainly
+
+Software alone cannot reach generation `0xfffffe` -- that is 16.7M populates -- so this needs the
+reset fixture, the same standing R59's `owner_hart = 0x63` fixture has and for the same reason. The
+window is exactly **one** re-mint: after the colliding Populate `retired` is true and the next is
+refused. Calling it cross-principal needs the abandoned frame handed to another object, which is one
+more ordinary Populate and no new mechanism -- the same standing R65 was accepted under.
+
+#### The audit's second survivor, recorded as a LEAD and NOT numbered
+
+The same pass surfaced a second candidate that survived two independent refuters, and it is recorded
+here **unverified by me** so it is not lost and not overstated:
+
+> `veda_trap_frame_abandon` asks *"is a frame outstanding"* -- a **count** -- and never *"does this
+> sentry own that frame"* -- an **identity**. `veda_trap_depth` is incremented at exactly one site
+> (trap entry) and decremented at two (`restore_on_xret` and `abandon`); OCInvoke touches it nowhere.
+> So an OCRETURN that returns **into** a handler pops a counter nothing pushed, and the frame it
+> consumes belongs to a third principal. At depth 0 the restore body is skipped entirely, so a
+> following `mret` restores privilege while the bounds belonging to it are gone.
+
+I have **not** verified this at source and **not** attempted to refute it. It is a lead requiring its
+own pass, not R67.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**

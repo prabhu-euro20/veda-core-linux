@@ -299,15 +299,15 @@ same-hart cross-compartment case (no flush needed).
 
 **The section above records the 2026-08-11 red-team pass, which reasoned over DESIGN_00-06 and
 produced R1..R9 plus Rev-A..Rev-F. It is intact and still correct. It is also only a third of the
-register.** Implementing the design produced **fifty-four more findings, R10 through R65**, and they
+register.** Implementing the design produced **fifty-four more findings, R10 through R66**, and they
 are a different kind: the red-team pass found things by *reading the design*, while these were found
 by *running the two layers against each other* and by adversarially attacking what had just been
 built. Several were exploitable. **None of them could have been predicted from the documents alone**,
 which is the argument for keeping the Sail model and the RTL as two independently-written layers with
 a differential harness between them.
 
-**All sixty-five live in `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which now runs
-R1..R65 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
+**All sixty-six live in `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which now runs
+R1..R66 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
 R18, R25, R27, R28 -- and **three of them were shipped, verified hardware fixes**, two of exploitable
 class, invisible because they had landed under a parallel `RTL-n` numbering or been co-committed under
 another finding's heading. They are entered now.
@@ -353,7 +353,7 @@ gate -- "Sail residency/COW corpus (positive + negative + mutation), then RTL mi
 
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
-cross-layer differential suite. As of 2026-08-19: **115/115, 104/104, 51/51, 25/25**, and it now ends
+cross-layer differential suite. As of 2026-08-19: **116/116, 105/105, 51/51, 25/25**, and it now ends
 with an explicit verdict line.
 
 **Read that command's history before trusting any earlier number.** Until R46 it **could not fail**:
