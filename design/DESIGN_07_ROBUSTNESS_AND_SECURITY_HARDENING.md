@@ -909,6 +909,65 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R38(b) RESOLVED. A copy-on-write object is not pageable, and the recovery that looked available was unsafe
+
+**Status: FIXED AND VERIFIED ON BOTH LAYERS. Sail 102/102, RTL 90/90, ACT4 51/51, differential 20/20.
+One term added to `page.out`'s existing refusal chain. The measurement that recorded the defect is
+renamed rather than edited, because its name -- "lockout" -- stopped being true.**
+
+R38 made the split right belong to whoever held PERM_STORE at the moment the object became
+copy-on-write. Because `set.cow` deliberately does not bump the generation, that entitlement lives in
+exactly one place: the live capability registers that predate it. **`veda.odt.page.out` exists to
+destroy exactly those.** It bumps the generation -- which is how outstanding capabilities are
+invalidated, and it is necessary, because every capability caches its own `Base` and page-in supplies
+a new one -- while carrying `cow` across untouched. One round trip left an object **nobody could
+split**: every pre-cow capability stale, the entry still copy-on-write, and the only way back in a
+`Bind` that masks store off.
+
+**THE FIX IS NOT THE ONE THE RECORD NAMED FIRST, AND THE SEARCH FOR A CHEAPER ONE IS WHAT FOUND THE
+SECOND DEFECT.** The recorded leading closure was this refusal, with its cost stated: copy-on-write
+objects become unpageable, and in a system under memory pressure those are the common pages. Before
+accepting that, three cheaper closures were worked through and each was refuted at source:
+
+- **Make `Rebind` preserve the holder's own `Perms` instead of re-deriving them from the entry.** This
+  would have let a paged-out holder refresh its capability and keep its store permission -- and it
+  would also have closed half the ADVISORY escape. **Refuted by the specification**: §4 defines Rebind
+  as refreshing *"`Base`/`Length`/`Perms`/`otype`/generation **from the ODT**, leaving `Offset`
+  unchanged"*. Taking `Perms` from the register is an ISA change, and relocation transparency -- the
+  goal Rebind exists for -- does not require it. Worse, Rebind takes its `Object_ID` from a GPR and
+  does not check it against the register's own, so preserving `Perms` would have made it an authority
+  *transfer*: hold a full-permission capability to A, Rebind against B, keep A's permissions on B's
+  bounds.
+- **Let page-out skip the generation bump for copy-on-write objects, relying on `resident` alone.**
+  Unsound: page-in supplies a NEW `Base` and capabilities cache the old one, which is the reason the
+  bump exists.
+- **Record the entitlement in the entry.** The ODT has exactly one per-principal field,
+  `owner_domain`, and it holds ONE domain -- while fork's whole point is that parent and child are
+  DIFFERENT domains and both are entitled. **A per-(domain, object) entitlement needs a table this
+  design does not have.** That is the successor, named rather than half-built.
+
+**AND THE "RECOVERY" I HAD RECORDED WAS UNSAFE, which is the sharper half of this entry.** The
+measurement's phase 5 said *"privileged software can still release the object by clearing cow"* and
+treated it as the escape hatch. It is not one. **Clearing `cow` on a genuinely shared object lets
+every sharer write the same object** -- precisely the isolation copy-on-write was providing. A
+recovery that silently merges two writers is worse than the lockout it repairs. That is why the
+refusal is placed **at the instruction that destroys the evidence**, rather than attempted afterwards
+from state that no longer exists.
+
+**THE COST, STATED RATHER THAN HIDDEN.** A copy-on-write object cannot be evicted until the sharing
+resolves -- one sharer writes and takes its private copy, or software tears the sharing down
+deliberately. Under memory pressure those are common pages, and this is a real limitation.
+**It cannot be weaponised**: `page.out` and `veda.odt.set.cow` both require
+`cur_privilege == Machine | veda_oda_authorized()`, so unprivileged code cannot mark objects
+copy-on-write to pin memory.
+
+**BLAST RADIUS: ZERO.** Measured before editing -- of the twelve tests in the corpus that call
+`page.out`, **not one also calls `set.cow`.** The composition the defect lived in had never been
+exercised, which is exactly why a differential suite reporting green had nothing to say about it.
+`difftest/probes/p18_cow_not_pageable.S` closes that: word 2 is the whole increment -- the entitlement
+is still there after the refusal -- and word 3 is the control proving a NON-cow object still pages out
+and back in cleanly, so a layer that had simply broken `page.out` could not pass.
+
 ### R41. A Populate carried the previous occupant's policy, and the two layers disagreed about it
 
 **Status: FIXED AND VERIFIED. Sail 101/101, RTL 90/90, ACT4 51/51, differential 18/18. Found by the
