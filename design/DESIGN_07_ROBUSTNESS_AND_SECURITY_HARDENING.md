@@ -4363,6 +4363,63 @@ time is a shipped architecture, not an unfinished one -- so the reset seeding is
 stand-in**, and this project already recorded that as a deliberate scope decision when it left the
 ODT seeding outside the fixture switch.
 
+### R58. My own R52 landing hit the wrong two clauses, and 108/108 did not notice
+
+**Status: SELF-INFLICTED, FOUND BY AN ADVERSARIAL PASS AND NOT BY THE SUITE, THEN CORRECTED AND
+COVERED. Sail 109/109, RTL 98/98, ACT4 51/51, differential 25/25.**
+
+R52's creation-policy edit was applied by a script that replaced *"the first two occurrences"* of
+`owner_domain = VEDA_DOMAIN_ANY` in `veda_ocl_insts.sail`. **In file order the three
+creation/destroy sites are Populate, DESTROY, Populate-Fast** -- so the edit hit Populate (right) and
+**DESTROY** (wrong), and **missed Populate-Fast entirely.**
+
+| | consequence |
+|---|---|
+| **Destroy** took `veda_creating_domain()` | a destroyed slot inherited the **destroyer's** domain -- **R41 broken**, whose whole point is that the previous occupant's policy has no claim |
+| **Populate-Fast** still wrote `ANY` | and **the shipped C allocator uses exactly that encoding**, so **R52 was void for every heap object** while being reported closed |
+
+**Both suites stayed green throughout -- 108/108 and 98/98, before and after.** Nothing in either
+corpus checked the `owner_domain` of a destroyed slot or of a `populate.fast`-created object.
+**Eighth instance on this project of a green result that measured nothing, and the first one that was
+mine, in shipped code.**
+
+**The RTL was right on both counts** -- its Populate arm is shared by `populate` and `populate_fast`,
+and its Destroy arm did not write `owner_domain` at all. So the correction was Sail-only.
+
+#### And verifying it turned up a pre-existing divergence, which is now closed too
+
+The RTL's Destroy arm writing nothing to `owner_domain` was itself a **Sail/RTL divergence** -- Sail
+resets to `VEDA_DOMAIN_ANY` (R41), the RTL **preserved**. It is observable, through the channel this
+register keeps finding: **`veda_bind_domain_ok` is evaluated BEFORE `e.valid`**, so a Bind against a
+**destroyed** slot still consults its `owner_domain`, and the trap **cause** reports which way it
+went:
+
+```
+reset to ANY   ->  gate passes  ->  OBJECT_NOT_FOUND  0x05
+left as N      ->  gate fails   ->  DOMAIN_VIOLATION  0x0B
+```
+
+**So the RTL's stale value was an oracle for the destroyed slot's previous owner** -- the same
+refusal-cause class R44 closed for bind mode `0b11`. Closed in Sail's direction, for both reasons.
+**Source-derived, not measured**: the RTL half was found by reading the arm's field list, not by
+running it.
+
+#### The test that can finally see any of this
+
+`sail_tests/vc_r58_domain_writers.S`, and three of its details are the point:
+
+- **A plain Bind, not `.notrap`.** Under `.notrap` a not-found object **soft-fails with no trap**, so
+  the cause -- the only thing that distinguishes the two outcomes -- never exists. A plain Bind
+  hard-traps on both paths and the **cause** separates them. The first draft used `.notrap` and
+  measured nothing.
+- **Compartment A's window is `0x40`, not `0x200`.** With `0x200` the window swallowed `arena` in
+  `.data`, and **R45's memory-scoped executing pin correctly refused** to populate an object
+  overlapping the code the compartment was running. *The pin was working; the scaffold was wrong.*
+  Its sibling constraint is R51's: the window must still reach the compartment's last instruction.
+- **`c0`/`c1`/`c2` only.** `c10..c14` are fixture-seeded and a trapping Bind never writes its
+  destination, which is how four consecutive measurements earlier in this same session read a seed
+  and reported a finding and its control as identical.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
