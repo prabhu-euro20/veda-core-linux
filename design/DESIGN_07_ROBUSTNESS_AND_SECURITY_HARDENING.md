@@ -4420,6 +4420,61 @@ running it.
   destination, which is how four consecutive measurements earlier in this same session read a seed
   and reported a finding and its control as identical.
 
+### R59. A re-minted object inherited the previous occupant's owner, and a domain-violating Bind still claimed it
+
+**Status: BOTH VERIFIED AT SOURCE, THEN FIXED AND COVERED ON BOTH LAYERS. Sail 110/110, RTL 99/99,
+ACT4 51/51, differential 25/25. Found by the R57 adversarial pass -- the design question it was asked
+came back (B), and these came back with it.**
+
+#### The owner byte nothing reset
+
+Sail resets `owner_hart = VEDA_OWNER_UNOWNED` on **Populate, Populate-Fast and Destroy**. The RTL's
+**only** dynamic write to that byte anywhere in the file was the owner **claim**. It never reset. So
+on the hardware a slot's owner **survived Destroy and re-Populate**, and a freshly minted object was
+born owned by whoever last held the slot.
+
+**Benign at `MHARTID = 0` and permanent above it.** With one hart a stale `0x00` still passes
+`owner_ok`, so nothing shows. With a real second hart **no instruction in the ISA can clear the
+byte** -- the claim is its only writer -- so hart A could never reclaim a slot hart B once bound,
+*even after destroying and re-minting it*.
+
+**This is R41's class applied to the third carried field.** R41 closed `cow` and `owner_domain` on
+exactly this argument -- a Populate mints a **new** object and the previous occupant has no claim on
+it. `owner_hart` was left behind, and the RTL had even written the absence down as deliberate.
+
+#### The claim that fired on a refusal
+
+`$veda_owner_claim_en` carried `!region_fault` and `!residency_fault` and **not**
+`!domain_violation` -- and the comment directly above it explains exactly why the other two terms
+exist: *"a residency-faulting Bind takes ownership of an object it was just refused... ownership is
+the thing page-in is specified to PRESERVE."* The same argument, unapplied to the third gate. The two
+predicates are independent rather than exclusive, so both held for a valid, unowned object narrowed
+to another domain, and **the owner byte was written by a trapping instruction.** Sail cannot do this:
+its `veda_trap` returns before any `odt_write`.
+
+**Third instance of a class this one signal had already closed twice** -- and combined with the byte
+nothing resets, it was a **permanent, unrecoverable claim** on multi-hart.
+
+#### The test, and why it needs two files
+
+**This property cannot be tested fixture-free.** Nothing software can do on one hart sets
+`owner_hart` to a third value -- that is what the byte means. It is observable only because Milestone
+12 seeded slots at `0x63` ("hart 99"), a value `owner_ok` refuses, precisely as a stand-in for a
+second hart.
+
+**And the two layers seed different slots** -- Sail objects 5 and 615, RTL entries 60, 105, 109 --
+so this needs one test per layer rather than one shared file. Writing the RTL's ids into the Sail
+test produced a trap with the **wrong cause**, and it would have passed for the wrong reason had the
+cause not been asserted **as a value** rather than as "it trapped".
+
+Each file carries the control that matters: **an untouched `0x63` slot must still be refused**, so a
+machine that simply stopped checking `owner_ok` cannot pass by refusing nothing.
+
+**D4's own discriminator is described and NOT built**: bind a `0x63` object narrowed to a foreign
+domain from inside a compartment (domain violation), then bind it again from the ambient context --
+under the bug the first, *trapping* bind rewrote the owner to `MHARTID` and the second succeeds. It
+needs a compartment scaffold; recorded as **unmeasured** rather than claimed.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
