@@ -9,12 +9,18 @@ Single Address Space, Deterministic. Implementation repos cite these docs, never
 capability-format respec and the object-namespace scale decision are built and checked, not
 proposals-only:
 
-- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **76/76**
-  self-check (256-bit format, widened ODT entry + generation, the DESIGN_08 region table, and the
-  R10 CRBR hardening), every increment mutation-tested.
-- **RTL (hardware)** -- `veda-core-sindhu`, branch `sindhu`: **64/64** smoke tests through
-  increment RTL-5 (the DESIGN_08 region table, the Current-Region Base Register with validated
-  load/save/restore, and the explicit region fault).
+- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **102/102**
+  self-check (256-bit format, widened ODT entry + generation, the DESIGN_08 region table, the R10
+  CRBR hardening, and all of Phase 2 -- object residency, the page-out/page-in pair and
+  copy-on-write), every increment mutation-tested.
+- **RTL (hardware)** -- `veda-core-sindhu`, branch `sindhu`: **90/90** smoke tests, mirroring the
+  Sail model through the Phase-2 increments and the R36..R43 hardening.
+- **Conformance** -- RISC-V International ACT4 RV64I: **51/51**.
+- **Cross-layer differential** -- twenty probes run the same program on both layers and compare
+  signatures word for word: **20/20 as expected**. This is the suite that finds what neither layer
+  can find alone.
+
+**Reproduce all four with one command**: `veda-core/verification.sh` in the implementation repo.
 
 Both build on the frozen verified deterministic line (ACT4 51/51 on `veda_core.tlv`), which
 stays untouched -- read-only reference only.
@@ -57,9 +63,9 @@ Docs 00-06 are the original sequenced decisions; 07 and 08 were added as the wor
 | 02 | `design/DESIGN_02_ODT_UNIFIED_MM.md` | ODT becomes the unified mm structure (residency+COW+backing). No page tables. | ODT, Object-Bind, MSA fault model |
 | 03 | `design/DESIGN_03_MULTIHART_OBJECT_COHERENCE.md` | Coherence unit = object; **no coherence protocol** (cache-less); MSA serializes atomics | owner-hart, Veda-Atomic, MSA, cache-less pillar |
 | 04 | `design/DESIGN_04_PIPELINE.md` | Object-Bind = capability-load micro-op; checks parallel to addr-calc | synthesis study (95<114 gates), M24 stall FSM |
-| 05 | `design/DESIGN_05_PURECAP_PRIVILEGE_PROCESS.md` | pointer = capability; privilege = ODA possession | OCL.C/OCS.C, tag memory, ODA, droppriv |
+| 05 | `design/DESIGN_05_PURECAP_PRIVILEGE_PROCESS.md` | pointer = capability; privilege = ODA possession | OCL.C/OCS.C, tag memory, ODA, `mstatus.MPP`/`mret` (R36 retired `droppriv`) |
 | 06 | `design/DESIGN_06_BUILD_ORDER_AND_OPEN_QUESTIONS.md` | Sequenced plan; names the ODT trilemma (since resolved in 08) | whole-project Sail-first discipline |
-| 07 | `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md` | Adversarial 6-lens red-team; findings R1-R10 + a proposed 6th pillar (provably non-speculative) | the whole verified base + 01/08 |
+| 07 | `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md` | Adversarial 6-lens red-team (R1-R9) **plus thirty-four more findings, R10..R43, produced by BUILDING it** -- the register runs R1..R43 with no gaps | the whole verified base + 01/08 |
 | 08 | `design/DESIGN_08_OBJECT_NAMESPACE_SCALE.md` | The ODT trilemma, **resolved**: domain-segmented Object_ID `{region:20, local:24}` + the CRBR | ODT, Region Table, the 06 trilemma |
 
 ---
@@ -67,10 +73,14 @@ Docs 00-06 are the original sequenced decisions; 07 and 08 were added as the wor
 ## Build order (architect's sequence) and where it stands
 
 1. **Capability format respec** (01) -- large objects + large ID space + wide generation.
-   **-- DONE, both layers (Sail 72/72, RTL 62/62).**
+   **-- DONE, both layers** (Sail 72/72 and RTL 62/62 at the time; the suites now stand at
+   102/102 and 90/90).
 2. **Object-namespace scale** (08) -- the segmented-Object_ID + CRBR decision.
    **-- DONE, both layers** (Sail region table + RTL increment RTL-4). Closes Phase 1.
-3. **ODT as unified mm** (02) -- residency/COW/backing, Sail-first. **-- next (Phase 2).**
+3. **ODT as unified mm** (02) -- residency/COW/backing, Sail-first. **-- DONE except `backing`,
+   both layers**: object residency, the page-out/page-in pair, copy-on-write with an eligibility
+   predicate (R38), and the per-object bind gate are all built and mirrored. The ODT entry carries
+   no `backing` field yet, so `mmap(file)` has no mechanism -- that is the one Phase 2 item left.
 4. **Pipeline** the single-hart core (04) -- keep ACT4 51/51.
 5. **Multi-hart** (03) -- shared ODT, shared-binding, real aq/rl, MSA serialization.
 6. **Purecap toolchain** (05) -- pointer = capability value.
