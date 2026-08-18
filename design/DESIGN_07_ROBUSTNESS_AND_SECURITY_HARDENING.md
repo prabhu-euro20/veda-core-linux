@@ -4145,9 +4145,41 @@ and at 64 bits a huge request **wraps to a small sum and passes**. That is R18 f
 
 ### R52. A name is still full authority -- the bind gate's default is open, and that makes clearing registers at the crossing theatre
 
-**Status: MEASURED, WITH ITS CONTROL. NOT FIXED -- the fix is a policy decision this design
-deliberately deferred once and has never taken, and the previous attempt at it was retracted the same
-day for making compartments one-way.**
+**Status: MEASURED, THEN DECIDED, BUILT AND VERIFIED ON BOTH LAYERS -- with one half deliberately
+left open and named. Sail 108/108, RTL 98/98, ACT4 51/51, differential 25/25.**
+
+**THE POLICY, TAKEN:** *an object created **inside a compartment** belongs to that compartment's
+domain; an object created in the **ambient** context stays `VEDA_DOMAIN_ANY`.* Two lines per layer,
+no new instruction, no new field, no encoding.
+
+**THE AMBIENT ARM IS WHAT KEEPS R17 CLOSED, and it is the load-bearing half.** R17 forbade
+cross-domain Bind outright and was retracted the same day because a compartment's **return path is by
+construction in another domain**, so compartments became one-way. Here the boot/loader context builds
+the return paths, the type authorities and the shared services, and those stay open. Demonstrated
+rather than argued -- `sail_tests/vc_r52_creation_domain.S`:
+
+| | tag | |
+|---|---|---|
+| CONTROL 1: compartment A (region 1) binds **its own** object | **1** | its own domain still works |
+| **THE FINDING: compartment B (region 0) binds A's object by name** | **0** | **refused, `DOMAIN_VIOLATION`, exactly one trap** |
+| CONTROL 3: B binds an **ambient-created** object | **1** | **R17's return path intact** |
+
+**Measured before the decision was taken, not after:** the change was applied and the **whole corpus
+run** -- 107/107 Sail and 98/98 RTL, nothing broken. That is what told me the ambient arm was
+sufficient, and it is a stronger answer than reasoning about which tests might break.
+
+**WHAT IT DOES NOT CLOSE, and this is stated rather than discovered later.** The gate compares
+`owner_domain` against `veda_pcc_object[43 .. 24]` -- **the region** -- so two compartments in one
+region are **one principal**. That is R10's design, not an oversight: the region field of a code
+capability's Object_ID *is* the unforgeable domain identity. So this closes cross-**domain** naming,
+not cross-**compartment** naming inside a domain. Re-graining the subject from region to object needs
+a field wider than `owner_domain`'s 20 bits to hold a 44-bit identity, and that is a separate
+decision. `sail_tests/pending/vc_r52_bind_by_name_neg.S` is **still red on purpose** and now waits on
+exactly that, with its README saying so.
+
+---
+
+**The original finding, kept because it is what forced the decision:**
 
 R50's obvious fix is to clear the capability register file at the crossing. **That fix would achieve
 nothing**, and the measurement says so directly. In the reproduction the caller does **more** than any

@@ -9,7 +9,7 @@ Single Address Space, Deterministic. Implementation repos cite these docs, never
 capability-format respec and the object-namespace scale decision are built and checked, not
 proposals-only:
 
-- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **107/107**
+- **Sail (formal model)** -- `Veda-Core-sail-riscv` fork, branch `phase1-respec`: **108/108**
   self-check (256-bit format, widened ODT entry + generation, the DESIGN_08 region table, the R10
   CRBR hardening, and all of Phase 2 -- object residency, the page-out/page-in pair and
   copy-on-write), every increment mutation-tested.
