@@ -5069,6 +5069,94 @@ attempt to refute it. It is a **lead requiring its own pass**, not R65. Note als
 end-to-end form needs a real allocator that reuses frames, which the shipped model does not have --
 so the primitive is measurable but the exploitation is architectural.
 
+### R65. An authority test against a Base the object has left -- the ODA's window in TIME
+
+**Status: MEASURED END TO END ON THE SHIPPED MODEL, THEN FIXED AND COVERED ON BOTH LAYERS. It began
+as a LEAD the R64 design pass surfaced and deliberately refused to number, under this register's own
+rule that a finding must be refuted before it is recorded. It survived the refutation.
+Sail 115/115, RTL 104/104, ACT4 51/51, differential 25/25.**
+
+#### The gate, and the value it tests
+
+`veda.odt.set.cow` and `veda.odt.set.domain` authorize a **delegated** actor with
+`veda_oda_denies(old_entry.Base, old_entry.Length)`, and neither required the entry to be **resident**.
+Page-out preserves `Base` as an explicitly dead value -- the model's own comment on that very line
+reads *"stale, and unreachable"* -- because freeing the frame is the entire point of eviction.
+
+So for a paged-out object the gate asks about **the frame the object has left**, and grants authority
+over **the object it is**.
+
+#### Measured, by instruction trace, on the shipped model
+
+From User, holding an ODA covering **only** `victim_frame`:
+
+```
+[53] [U] set.domain on the PAGED-OUT victim  ->  retired.  ACCEPTED
+[57] [U] set.domain on an out-of-window obj  ->  TRAPPED             <- control
+[84] [M] page.in the victim at new_frame     ->  succeeded
+[88] [M] cgetbase                            ->  0x80000240 = new_frame
+```
+
+The attacker's ODA covered `0x800001c0` and **never** covered `0x80000240`. `veda.bind` consults no
+ODA at all, so the capability at the new frame is mintable. After the fix, the same binary:
+
+```
+[53] [U] set.domain  ->  [54] [M] trap_handler+0
+```
+
+#### Why the obvious refutations fail
+
+- **"The actor gains nothing -- it could Destroy and Populate instead."** No. `Destroy` clears
+  `valid`, and `page_in` refuses unless `old_entry.valid`. The victim's **restored contents** are
+  reachable only through this path.
+- **"This is R47's residual."** No. R47 gave the ODA a window in **space**. This is the same window in
+  **time**: correct when written, meaningless the instant the object is evicted, and **nothing marks
+  the transition**.
+- **"The frame is not really reused on the shipped model."** True -- and it does not matter, because
+  the escalation does not depend on frame reuse. It depends on `page_in` installing a **new** Base
+  (`rs2`), which is shipped behaviour, so the object moves to memory the attacker never had authority
+  over while the attacker's policy write persists.
+- **"An ambient actor could bind it anyway."** Only from ambient, where `veda_bind_domain_ok` short-
+  circuits on `veda_pcc_object == VEDA_OBJECT_NONE`. The attack matters exactly where that
+  short-circuit does not apply.
+
+#### The fix, and one deliberate asymmetry with R62
+
+**While an object is not resident its `Base` describes nothing, so it may not authorize anything.**
+`veda_stale_authority(e) = (cur_privilege != Machine) & e.valid & not(e.resident)`, added as the first
+term of both policy writers' gates on both layers.
+
+**Machine is EXEMPT, deliberately -- the opposite of the R62 decision, for a stated reason.** R62
+gated a **well-formedness** question (*does this principal exist?*), which applies to every caller
+including Machine. This gates the **validity of an authority test**, and Machine takes the
+`cur_privilege == Machine` half of the OR and is never window-tested at all -- so gating it would
+remove a real capability from the loader for no security gain. Two similar-looking checks, opposite
+answers, and the difference is which question the gate is asking.
+
+`page_in` is untouched: its first conjunct tests the same stale Base, but its **second** tests the
+live destination, so a delegate can only pull an object into memory it already controls.
+
+#### Coverage
+
+`sail_tests/vc_r65_stale_base_authority_neg.S` and `rtl/sim/veda_smoke_r65_stale_base.S` + testbench.
+Both carry the control that decides what the finding is -- **the same actor, the same instruction, an
+object outside the window, still refused** -- so a fix that simply broke `set.domain` for delegates
+cannot pass. The RTL half was shown to fail with the term stripped from a copy of the generated
+Verilog (`x19 = 0`, the write accepted), and **the strip was asserted to have landed before the run
+was believed**, per the R62 lesson.
+
+#### Residuals
+
+- **NOT CLOSED, and architectural rather than measurable:** `page_in`'s first conjunct still tests a
+  stale Base. A delegate holding the dead frame *and* a frame of its own can page a victim in at its
+  own address before a real pager does. On the shipped model this gains nothing -- page-in moves no
+  bytes, so it reads its own memory -- so it is a **denial/confusion primitive against a pager that
+  does not exist yet**. Recorded as **UNMEASURED**.
+- **NOT CLOSED:** `set.cow` and `set.domain` still carry **no owner check at all**. The ODA window is
+  the only authority test, so any delegate whose window covers a **resident** object's memory may
+  rewrite that object's policy. That is arguably R47's design rather than a defect -- but it is
+  written down here so the next reader decides it deliberately rather than inheriting it.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
