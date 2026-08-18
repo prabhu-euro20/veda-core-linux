@@ -4928,6 +4928,147 @@ name a region that does not exist*. The strong form -- *you may populate only in
 unless you hold an explicit grant* -- is **not built**, because the grant object does not exist and
 the ambient loader legitimately populates into region 1 today. See R57, premise 4.
 
+### R64. `backing` is DECIDED AGAINST -- and the prerequisite DESIGN_02 named is built instead
+
+**Status: DECIDED AGAINST (the field), BUILT AND VERIFIED ON BOTH LAYERS (the prerequisite). The
+decision came from a 19-agent adversarial design pass: four independent architects, each attacked
+from three lenses -- confused-deputy, temporal-safety, and unobservable-mechanism.
+Sail 114/114, RTL 103/103, ACT4 51/51, differential 25/25.**
+
+#### The question
+
+Phase 2's one unbuilt item was the ODT entry's `backing` field. DESIGN_02 says `mmap(file)` is *"an
+object whose backing is the file"*, and the entry carries no such field, so `mmap(file)` has no
+mechanism. The pass asked what `backing` should be: an opaque software handle, a capability, a
+structured `(device, offset)` tuple -- or nothing at all.
+
+#### The verdict: build no field
+
+**Do not add `backing` to `odt_entry` on either layer.** Three positions were designed and attacked;
+the fourth agent died on a schema retry cap and its design was never seen, which the synthesis
+recorded as a stated gap rather than papering over. What killed the two field-bearing positions:
+
+- **Opaque handle** -- killed by a **stale-base window inversion**, found independently by all three
+  of its attackers. Its only scoping guard was `veda_oda_denies(old_entry.Base, old_entry.Length)`,
+  and it is evaluable only when the entry is **non-resident** -- but page-out preserves `Base` as an
+  explicitly dead value (`veda_ocl_insts.sail:1314`, whose own comment says *"stale, and
+  unreachable"*), and freeing that frame is the entire point of eviction. So in every reachable case
+  the authorization test compares the ODA against a physical range the object no longer occupies.
+  **It authorizes whoever inherited the corpse.**
+- **Capability-valued backing** -- killed three ways. Its `xchg.backing` returns exactly the value
+  its own read gate exists to withhold; it transplants `VEDA_OSPECIALRW`'s read-then-write semantics
+  onto an instruction gated `Machine | oda_authorized()` while the original is **Machine-only**
+  (`veda_cap_insts.sail:978`), creating the machine's first ODT-to-CRF authority channel; and 257
+  bits do not fit in the 16 free bits of a 32-byte entry.
+
+And what killed the "no field" position's own *alternative* -- representing a lazy mapping as an
+**absent** entry -- is the sharpest result of the pass: that is the one ODT state in which per-object
+bind authority is **structurally disabled on both layers**. `empty_odt_entry` carries `owner_domain =
+VEDA_DOMAIN_ANY`, `veda_bind_domain_ok` returns true on its first line for ANY, and the RTL's
+`$veda_domain_violation` carries a `$veda_odt_valid` conjunct that makes the gate literally
+unreachable on an invalid slot. Its *thesis* -- do not store a field nothing can read -- survived
+every attack untouched.
+
+**The decisive argument is `region_backing`.** The region table has carried a 56-bit `region_backing`
+field for five increments. Nothing reads it. It is write-only storage, and it is precisely what an
+object-level `backing` would become, because **there is no instruction that reads an ODT entry field
+into a GPR at all** -- verified: all seven ODT instructions end `X(rd) = zeros()`.
+
+#### What was built instead, and why it is the right increment
+
+DESIGN_02 itself names the prerequisite and says where it belongs in the order of work:
+
+> *"The handler cannot identify which object faulted. `mtval` carries {cap_idx, cause}, not an
+> Object_ID ... That is a software workaround for a missing architectural channel, and **it should be
+> resolved before `backing` is designed rather than after**."*
+
+Verified still open. `CGetObjectID` closed it for the **copy-on-write** fault, where a live
+capability exists to interrogate -- and the Sail source cites DESIGN_02's open item as its motivation.
+It does **not** close it on the **bind** side: the residency trap passes `rd`, the destination
+register of a Bind that never completed (`veda_bind_insts.sail:317`; the RTL agrees at
+`veda_core.tlv:5339`). **No capability names the faulting object, so nothing can recover it.**
+
+So this increment builds **`veda_mfaultobj`, read-only CSR `0x7C9`** -- verified unallocated on both
+layers -- carrying the faulting Object_ID.
+
+#### Fail-closed by construction, which is the design decision worth stating
+
+The obvious implementation threads the Object_ID through `veda_trap`, which has **fifty-three call
+sites**. A scripted mass-edit across near-identical sites is exactly what produced R58. So `veda_trap`
+is left untouched and a **second entry point** `veda_trap_obj` carries the name; the single trap
+chokepoint (`veda_pcc_save_and_reset`, where R10 and R12 both landed, and whose own comment says
+*"per-site additions miss paths"*) writes `VEDA_OBJECT_NONE` whenever nothing was staged.
+
+**An unconverted site can only ever cost information. There is no edit anywhere that makes this
+register report the wrong object.** Five bind-side entry-derived traps are converted, each anchored
+on its own line: REGION_FAULT, DOMAIN_VIOLATION, RESIDENCY_FAULT, OWNER_VIOLATION, OBJECT_NOT_FOUND.
+
+Sail needs two registers (the name, plus a "was anything staged" flag) because its trap helper runs
+before the chokepoint and cannot see the outcome. **The RTL sees both facts in the same cycle, so one
+mux expresses the whole discipline** -- a difference between the layers that is real rather than a
+divergence, and is written down as such.
+
+#### Measured, on both layers
+
+```
+reset                          -> 0xFFFFFFFFFFF   sentinel
+bind object 400 (never populated) -> 0x190 = 400  OBJECT_NOT_FOUND
+ecall (no descriptor consulted)   -> 0xFFFFFFFFFFF   fail-closed
+bind object 401 (paged out)       -> 0x191 = 401  RESIDENCY_FAULT, nothing minted
+csrw 0x7C9 (illegal)              -> 0xFFFFFFFFFFF   fail-closed on a NON-Veda trap
+```
+
+**The reset is the sentinel and not zero, and the first version got that wrong.** Object 0 is a legal
+name, so a zero reset makes *"nothing faulted"* and *"object 0 faulted"* the same reading -- R10's
+argument for the CRBR's out-of-window sentinel, applied a second time. Its own CONTROL 1 caught it.
+
+#### And a third ABI-alias collision, recorded because the pattern is now undeniable
+
+The first draft of the Sail test wrote `li s11, <sentinel>` while using `x27` as the trap counter --
+**`s11` IS `x27`** -- and `li t3, N` against `x28`. R62 was `t4` versus `x29`. Three collisions in one
+session, each turning a check into a comparison of a value with itself. Both R64 tests now name
+**every register by number**, and say why in their headers.
+
+#### Residuals, stated
+
+- **NOT CLOSED -- `mmap(file)` still has no mechanism.** DESIGN_02's *"an object whose backing is the
+  file"* remains unimplementable as written. It needs a **second producer** of `{valid, not
+  resident}`, and page-in's safety currently rests on an enumeration argument (*"page-out is the sole
+  producer"*) rather than on the property behind it (*every producer must first kill every
+  outstanding capability to that object*). That rewrite is owed whether or not `backing` is ever
+  built.
+- **NOT CLOSED -- content preservation across a paging cycle is a software obligation with no
+  hardware precondition.** Page-out moves no bytes, frees nothing and scrubs nothing.
+- **NOT CLOSED -- the no-scrub disclosure on the ordinary eviction path.** Page-out leaves the old
+  frame fully populated at a known address; a pager that evicts A and then Populates B at that Base
+  hands B's first binder every byte of A, and R45 established there is no disjointness check.
+- **REOPENING CONDITION for `backing`, written into the decision so it is a decision and not a
+  silence:** it may be reconsidered only when (a) an ODT-entry **read** primitive exists -- DESIGN_02
+  calls this *"the pillar-sensitive half"*, and it would be the first channel from the table to the
+  program that is not a capability -- **and** (b) a real pager exists to consume it, **and** (c) the
+  writer is the **evictor**, so its authorization runs against a live `Base`. Storage and delivery
+  must ship in **one** commit; a commit that adds the field without the reader produces
+  `region_backing`, byte for byte.
+
+#### A LEAD, deliberately NOT recorded as a finding
+
+The adversarial pass surfaced this and refused to number it, correctly, under this register's own
+rule that findings must be refuted before they are recorded:
+
+> `veda.odt.set.cow` and `veda.odt.set.domain` both gate on
+> `veda_oda_denies(old_entry.Base, old_entry.Length)` and **neither requires the entry to be
+> resident, and neither carries an owner check** -- verified at source. Against a **paged-out**
+> object, whoever legitimately inherits the reclaimed frame passes the window test on the previous
+> occupant's dead descriptor, and can retarget its `owner_domain` to their own. After page-in the
+> object binds to the thief.
+
+I verified both premises at source: page-out does preserve `Base` as explicitly stale, and
+`set.domain`'s gate list is privilege, `region_nameable | oda_denies`, `valid`, `domain_nameable` --
+with **no residency and no ownership term**. I did **not** execute the sequence and did **not**
+attempt to refute it. It is a **lead requiring its own pass**, not R65. Note also that its
+end-to-end form needs a real allocator that reuses frames, which the shipped model does not have --
+so the primitive is measurable but the exploitation is architectural.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**

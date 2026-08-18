@@ -290,7 +290,14 @@ Added 2026-08-12, from grounding increment 2. These are real gaps, not polish:
   pager cannot read `backing` back by any means today. Writing it is cheap (a second CSR,
   or a new Custom-0 funct7); **reading it is the pillar-sensitive half** and is the part
   with no existing mechanism.
-- **The handler cannot identify which object faulted.** `mtval` carries {cap_idx, cause},
+- ~~**The handler cannot identify which object faulted.**~~ -- **RESOLVED, DESIGN_07 R64.**
+  Read-only CSR `0x7C9` `veda_mfaultobj` carries the faulting Object_ID, on both layers, and is
+  **fail-closed**: any trap whose instruction staged no name reports `VEDA_OBJECT_NONE`. Five
+  bind-side entry-derived traps are converted (REGION_FAULT, DOMAIN_VIOLATION, RESIDENCY_FAULT,
+  OWNER_VIOLATION, OBJECT_NOT_FOUND); an unconverted site can only cost information, never report a
+  wrong name. This item said it "should be resolved before `backing` is designed rather than after",
+  and that is exactly the order it was done in. The original text follows.
+  **The handler cannot identify which object faulted.** `mtval` carries {cap_idx, cause},
   not an Object_ID. A pager written today would have to decode the faulting instruction
   at `mepc`, or dispatch on the capability index. That is a software workaround for a
   missing architectural channel, and it should be resolved before `backing` is designed
