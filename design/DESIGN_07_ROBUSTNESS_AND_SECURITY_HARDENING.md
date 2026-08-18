@@ -961,9 +961,50 @@ not checking it.**
 
 ### R45. Aliasing ODT entries are unchecked, and the executing-object pin is name-scoped while its guarantee is memory-scoped
 
-**Status: RECORDED, NOT MEASURED. Derived from source by the R1 adversarial pass and re-verified by
-its synthesis agent; NOT yet reproduced on either layer, and that is stated rather than glossed.
-Entered here rather than left in a task list.**
+**Status: MEASURED, THEN FIXED AND VERIFIED ON BOTH LAYERS. Sail 103/103, RTL 90/90, ACT4 51/51,
+differential 21/21. The reproduction came first and is kept as the test.**
+
+**WHAT WAS DECIDED, AND THE LINE IS DELIBERATE: aliasing stays legal; the pin becomes memory-scoped.**
+Two names for one range is not itself a defect -- SLAB-CARVE (R1) mints children *inside* a parent's
+window by construction, so a machine that refused overlap outright could never carve. What was wrong
+is that a pin whose whole purpose is *"do not evict the memory the CPU is executing from"* was
+comparing **names**.
+
+**MEASURED FIRST.** `sail_tests/vc_r45_odt_alias_neg.S` populated 800 and 801 at the same Base --
+neither refused -- stored through one and read it back through the other; then, from inside a live
+compartment executing object 810, populated 811 at 810's own Base and paged it out. **Both succeeded.**
+Its control showed the pin still refusing 810 itself, so the mechanism was not broken -- it was
+looking at the wrong thing.
+
+**THE FIX IS O(1) AND NEEDS NO DISJOINTNESS TABLE.** Enforcing disjointness at Populate would mean
+testing a new window against every live entry -- 2^23 in this model -- which is not a hardware
+operation. The pin does not need that: it needs **one** window, the one being executed, and that is
+two live registers. One range overlap, computed 57 bits wide because Base is 56 and Length is 40 and
+**R18 was a bounds check that wrapped at its own width**.
+
+**MY FIRST DRAFT WAS REFUTED BY THE CORPUS, IN THE CONTROL THAT EXISTS FOR EXACTLY THIS.**
+`vc_r11b_executing_pin_neg` PART D: *"an unrelated object is still evictable while a compartment runs.
+Without it, a core that refused every eviction outright would pass everything above."* Its CODE object
+is populated with Length UNBOUNDED, so the window covered all memory and my arm **refused every
+eviction on the machine.** It caught it on the first run. The arm is now gated on a **bounded**
+compartment: an unbounded PCC describes no region, so the window test degenerates rather than being
+conservative, and R26 already settled that the **name** is the trustworthy predicate there.
+**The residual is stated rather than hidden:** a compartment entered on an unbounded code object still
+gets only the name pin.
+
+**AND MY OWN TEST WAS WRONG ABOUT THE LINE, WHICH SHARPENED IT.** It asserted that *minting* a fresh
+alias at the running Base would be refused. It is not, and the fix is not what was wrong -- the
+assertion was. A name that does not exist yet has no window to compare, and creating a second name for
+memory harms nothing. **Creation is free; the alias is useless as an eviction handle.** The test now
+proves both halves, plus a disjoint control that still evicts cleanly.
+
+**A TESTING CONSTRAINT THIS CORPUS HAD NEVER HIT, worth keeping.** Inside a *bounded* compartment the
+purecap rule refuses every ordinary load and store, and `RVMODEL_HALT_PASS` stores to `tohost` -- so a
+test cannot halt or branch to a failure label from inside one. The other pin test never met this
+because its compartment is UNBOUNDED, which is the single structural difference between the two files.
+The body records; the assertions run after an `ecall` escape that clears the saved bound first.
+
+*(The finding as first derived follows.)*
 
 **No disjointness check exists anywhere.** Populate takes `Base` verbatim
 (`veda_ocl_insts.sail` Populate and Populate-Fast), and a grep for `overlap|disjoint|intersect` across
