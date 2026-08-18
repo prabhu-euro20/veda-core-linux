@@ -909,6 +909,93 @@ unreachable at any lower privilege and the inner test can never be false. The be
 the record overstated what that half of R27 did. **Only R27's RTL mirror was ever live** -- which is
 also why R35 mattered: on the layer where the term does work, one of the five arms did not have it.
 
+### R44. An unallocated encoding whose refusal cause leaked ODT state -- and the probe that watched it was blind twice
+
+**Status: FIXED AND VERIFIED ON BOTH LAYERS. Sail 102/102, RTL 90/90, ACT4 51/51, differential 21/21.
+The fix ADDS NO MECHANISM -- it moves one condition into the decode. Found by the adversarial pass on
+R1, because `veda.bind` mode `0b11` is the exact encoding slot SLAB-CARVE would occupy and the two
+layers had to be made to agree about it before anything could be built there.**
+
+`veda.bind` mode `0b11` is `VEDA_BIND_RESERVED`. Both layers agreed it must trap. **They disagreed
+about why, and the difference was a function of state the instruction was never entitled to consult.**
+
+| | before |
+|---|---|
+| **Sail** | reached `VEDA_BIND_RESERVED => Illegal_Instruction()` only AFTER three state-dependent traps had had their chance -- region residency (`REGION_FAULT 0x09`), the per-object domain gate (`DOMAIN_VIOLATION 0x0B`), object residency (`RESIDENCY_FAULT 0x0A`) |
+| **RTL** | mode `0b11` is absent from `$veda_decoded`, so it is `$veda_undef_encoding` and refused **at decode** -- `Illegal_Instruction` unconditionally, with the three fault signals gated on the three real modes only |
+
+**MEASURED BEFORE THE FIX** (`difftest/probes/p19_bind_reserved_mode.S`, against region 2, which both
+layers seed valid-but-non-resident so the reproduction needs no setup):
+
+| word | Sail | RTL | after |
+|---|---|---|---|
+| mcause | **0x18** (a Veda trap) | **0x02** (illegal instruction) | 0x02 on both |
+| mtval | **0x49** = (c2 << 5) \| 0x09 REGION_FAULT | the raw instruction word | the raw word on both |
+| control, region 0 | 0x02 | 0x02 | unchanged |
+
+**WHY IT MATTERS BEYOND PARITY.** On Sail the refusal cause for an **unallocated encoding** depended on
+another domain's paging state. That is a small **ODT oracle**: unprivileged code can issue
+reserved-mode binds and learn, from the cause alone, whether a region is resident or whether a domain
+matches -- about objects it has no right to. An instruction's *legality* must not depend on the state
+of a table it was never entitled to read.
+
+**THE FIX DELETES A SPECIAL CASE RATHER THAN ADDING A CHECK.** The `encdec` clause gains
+`& mode != 0b11`, so mode `0b11` **does not decode at all** and the model's own wildcard clause catches
+it -- `mapping clause encdec = ILLEGAL(s) <-> s` in `postlude/insts_end.sail`, whose own rule R30
+already cited by name: *"the encdec mapping must come last to ensure that all unmatched encodings
+decode to an illegal instruction."* An unallocated encoding is now refused by the same general
+mechanism as every other unallocated encoding, instead of by a hand-written arm that ran too late.
+The `VEDA_BIND_RESERVED` match arm stays -- Sail requires exhaustiveness -- marked unreachable by
+construction, so that if it ever fires again the guard has been lost.
+
+**AND THE PROBE THAT SHOULD HAVE CAUGHT IT WAS BLIND TWICE OVER.** `difftest/probes/p5_reserved.S`
+exists to prove unallocated encodings are refused. It used `Object_ID 1` -- region 0, resident,
+`owner_domain` ANY -- so **all three Sail gates pass and it measured the one case where the layers
+already agreed**. And its handler counted traps and read `mepc`, **never `mcause`**, so even a
+different cause would have been invisible. It has reported AGREE throughout. Both blind spots are
+closed: p5 now records the cause of each of its three refusals.
+
+**That is the fourth time in this pass that a green test turned out to pin the wrong thing**, after
+`veda_smoke_r27_csr_priv.S`, `vc_check_order.S` PHASE D and `vc_ocl_ocs_c.S`. **Counting a refusal is
+not checking it.**
+
+### R45. Aliasing ODT entries are unchecked, and the executing-object pin is name-scoped while its guarantee is memory-scoped
+
+**Status: RECORDED, NOT MEASURED. Derived from source by the R1 adversarial pass and re-verified by
+its synthesis agent; NOT yet reproduced on either layer, and that is stated rather than glossed.
+Entered here rather than left in a task list.**
+
+**No disjointness check exists anywhere.** Populate takes `Base` verbatim
+(`veda_ocl_insts.sail` Populate and Populate-Fast), and a grep for `overlap|disjoint|intersect` across
+the Veda model, `veda_core.tlv` and `VEDA_CORE_SPEC.md` returns only unrelated hits. **Two Object_IDs
+may name the same memory.**
+
+R11(b) pinned the executing object so a Populate cannot pull the ground out from under running code.
+But the pin is an **identity test on the name**:
+
+    veda_object_is_executing(object_id) = (object_id == veda_pcc_object) | (...== veda_mepcc_object)
+
+while the property it is protecting is about **memory**. So an authority holding Machine or a tagged
+ODA -- R11(b)'s own stated adversary -- can Populate a **second name** at the **same Base** as the
+running compartment's code object and then page *that* name out: the pin compares 190 against 180 and
+passes. Fetch cannot notice, because `ext_fetch_check_pc` compares the PC against PCC's **cached**
+bounds only.
+
+**HONEST SEVERITY.** Nothing is corrupted in-tree today: there is no pager acting on the answer, and
+the eviction only clears the second name's `resident` bit and bumps its generation. What is wrong is
+the **architectural statement** -- and the RTL sets that standard itself for the converse case, where
+its own comment says a silent refusal *"is worse than either trapping or succeeding, because the pager
+then reuses memory it does not own"*.
+
+**THE CORPUS CANNOT SEE IT.** `vc_r11b_executing_pin_neg.S` PART D is the over-refusal control and
+populates its second object at a **disjoint** label. So the suite covers the disjoint case and the
+same-name case and **nothing in between**. No test in any corpus populates a second object at an
+already-live Base.
+
+**BEARS DIRECTLY ON R1.** SLAB-CARVE mints child objects *inside* a parent's window by construction --
+aliasing is not an edge case there, it is the mechanism. A carve design cannot be built on an ODT that
+has no opinion about overlap.
+
 ## REGISTER INTEGRITY AUDIT -- the four numbers that had no entry, and why
 
 **Prompted by a direct question about the numbering, audited across all three repositories by
