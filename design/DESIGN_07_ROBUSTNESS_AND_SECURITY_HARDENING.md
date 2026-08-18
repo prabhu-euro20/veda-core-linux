@@ -3812,6 +3812,203 @@ capability**, not a permission bit on the arena capability, so it needs no split
 What R1 still owes is the **namespace** half -- per-element Object_IDs and where they come from --
 not the **authority** half. That is a strictly smaller question than the one the design pass faced.
 
+### R48. A callee compartment inherits the caller's ODA across every crossing -- and the caller cannot drop it
+
+**Status: MEASURED, THEN FIXED AND VERIFIED ON BOTH LAYERS. This was recorded as an R47 open half
+before it was measured; it is now closed. The successor is named below, not implied.**
+
+`OCInvoke` narrows PCC to the callee's bounds, installs a fresh IDC, reloads the CRBR for the entered
+domain, and **clears the SSC**. Every authority the crossing touches is narrowed or dropped. It left
+`veda_oda` and `veda_tsc` untouched -- and **the argument against that was already written down, for
+the SSC, inside the OCInvoke clause itself**:
+
+> *"applying **ODA/TSC's own 'untouched by OCInvoke' convention** to SSC would have left the caller's
+> entire stack region reachable from the callee."*
+
+Nobody turned that argument back on the ODA. **Before R47 it was moot** -- an unscoped ODA reached all
+of memory from anywhere, so a crossing changed nothing. R47 gave it a window, and **inheriting a
+window is inheriting mint authority over the caller's memory.**
+
+**MEASURED, on the specification layer, before a line was changed.** A User compartment entered via
+OCInvoke holding nothing but a code capability and a data capability:
+
+| | measured |
+|---|---|
+| caller's object, after the callee ran | **destroyed** |
+| a fresh descriptor over the caller's window | **minted** |
+| traps taken by the callee | **0** |
+| `mcause` | **0x00** |
+
+**AND THE CALLER CANNOT DEFEND ITSELF -- this is what removes "software discipline" as an answer.**
+`VEDA_OSPECIALRW` is `cur_privilege != Machine -> Illegal_Instruction`, for **read and write**, on
+**all three SCRs**, on **both layers**. A User caller holding a delegated ODA has **no instruction**
+with which to drop it before calling. If this closes anywhere, it closes in hardware.
+
+**THE FIX: `veda_oda_tag = false` at OCInvoke and OCReturn. Tag only, never the value** -- every
+consumer routes through `veda_oda_authorized()`, whose first term is the tag, and that is the same
+discipline the SSC clear already uses.
+
+**OCReturn carries the arm too, and on this machine that is not the direction people assume.** The
+shipped switcher enters threads **downward** through OCRETURN -- a thread is resumed by
+`OCA + CSealEntry + OCRETURN`, never by OCInvoke -- and `CSealEntry` mints sentries with no
+authorizing operand and no privilege gate. An OCInvoke-only clear would have left the project's own
+**primary domain-entry path** wide open.
+
+#### Three things this deliberately does NOT do, each on the record rather than left to be found
+
+- **The TSC is not cleared.** It has **zero consumers on either layer** -- no instruction's behaviour
+  changes because the TSC is tagged -- so clearing closes nothing, while the shipped switcher installs
+  the TSC one instruction before entering a thread through OCRETURN. Clearing would falsify that
+  contract **while every round-trip assertion stayed green**, because they read the value field and
+  never the tag. The TSC's boundary semantics belong to the increment that gives the TSC a consumer.
+- **`mret` is not touched**, and it *is* a fourth compartment entry (it restores PCC and the CRBR
+  pair). It is also the **only** instruction that lowers privilege, and therefore the sole vehicle by
+  which Machine delegates an ODA downward at all. Clearing there would delete the delegated half of
+  all seven ODA-gated instructions.
+- **OCJALR is not touched**: it does not cross a compartment boundary (Milestone 22), installs no PCC
+  and no CRBR. A clear there would be new policy, not a mirror.
+
+#### The refuted alternative, and the named successor
+
+**Auto-attenuation -- "narrow the ODA to the invoked compartment's own bounds" -- is REFUTED in the
+reading that sounds best.** Narrowing to `cs1` (the code capability) is *unsafe*: a callee whose ODA
+window is its own code object could mint a **fresh** Object_ID aliasing its own executing code, and
+the executing pin cannot stop it, because R45 deliberately decided that *"creation is free; the alias
+is useless as an eviction handle"* -- `veda_object_is_executing` requires `e.valid`, and a
+never-populated id is not valid. W^X falls out. Narrowing to `cs2` is sound, and once you take it,
+auto-attenuation **is** the delegated handoff below.
+
+**The successor: a monotone delegated handoff.** OCInvoke installs the ODA from `cs2` when `cs2`
+carries `PERM_ACCESS_SYSTEM_REGISTERS` **and** lies inside the caller's own ODA window; clears it
+otherwise. **That design's default branch is exactly the line shipped here**, so the clear is a strict
+prefix of it and nothing is discarded. It cannot land yet: it needs a sweep proving no existing `cs2`
+carries bit 7 (which would *silently gain* an ODA -- the one way that option can widen authority), and
+its ordering against the R10 region check and the R11 code-object check must be settled, because both
+must fault before any commit.
+
+**Availability cost, stated rather than hidden.** A User caller that crosses loses its ODA and must
+trap to Machine to be re-delegated one. The corpus's own recovery claim was **false** and is corrected
+in the same increment -- see R49.
+
+### R49. Seven test programs were built and never simulated -- and one of them had been asserting the opposite of the architecture since the generation counter was widened
+
+**Status: MEASURED, THEN FIXED AND VERIFIED. RTL corpus 90 -> 97.**
+
+`rtl/run_veda_smoke_test.sh` assembles **every** `veda_smoke_*.S` in `sim/`, printed *"96 images
+built"*, and then simulated **90**. Nobody compared the two numbers. Five of the missing seven had
+complete, committed testbenches and **no reference in any runner**; two more were referenced only by
+the security demo, never by the regression.
+
+These are not scratch files. **Milestone 15 is the copy-on-write RTL mirror, Milestone 16 is
+CGetObjectID plus the end-to-end COW repair, Milestone 17 is the OCJALR stack-frame work** -- every
+one a security mechanism, dark across roughly twenty subsequent increments including R30, R33, R36/R39,
+R38, R40, R41, R45 and R47.
+
+**AND ONE OF THEM WAS RED.** `veda_smoke_m16_neg` destroyed an Object_ID **256 times**, because the
+generation counter was **8 bits** and 256 destroys wrapped it exactly onto a stale capability's cached
+value. Increment 3 widened generation to **24 bits**. 256 destroys now reach `0x000100` -- nowhere near
+the `0xFFFFFF` ceiling -- so the re-populate **succeeded**, the stale access did **not** trap, and the
+file asserted the opposite of what the machine does.
+
+> **The widening silently orphaned its own regression test, and the widening looked free precisely
+> because that test had gone dark in the same era.**
+
+**Re-aimed rather than deleted.** The RTL already seeds two near-saturated fixtures for the paging
+work (Object_ID 106 at generation `0xFFFFFE`, 108 at `0xFFFFFD`). Two Destroys on 106 reach the ceiling
+and retire the slot, so the property is now measured in **two instructions instead of 256** -- and at
+the real 24-bit width rather than at a width the architecture no longer has. Same fixture-injection
+discipline Sail already uses for the identical property. Its pre-exhaustion sanity marker is now
+**checked by the testbench** rather than merely set, so a machine on which the capability never worked
+at all can no longer satisfy the two trap assertions for the wrong reason.
+
+**Two guards, because a count a human compares is not a check.**
+- **Coverage guard**: every assembled image must appear in a `+elf_hex=` line of the script itself, or
+  the run fails. (Its own first draft failed open -- it read `$0` after a `cd "$(dirname "$0")"`, so a
+  relative path no longer resolved and it reported all 96 unrun. A check that fails open reads exactly
+  like a check that fails closed until you look at the number.)
+- **Exit code**: this runner's verdicts are strings printed by 96 separate testbenches; its own exit
+  code was whatever the last `vvp` returned, which is 0 even with a red testbench. **Measured doing
+  exactly that.** Same defect as R46 one level down; `verification.sh` would have caught it at the
+  aggregator, but every RTL increment on this project invokes this script directly.
+
+**A third false claim, corrected here.** Both layers state that a compartment whose SSC was cleared
+*"re-establishes its own SSC via an explicit OSpecialRW."* **OSpecialRW is Machine-only**, so a User
+compartment cannot. Measured: inside a User, PCC-bounded compartment an ordinary `sd` traps (the
+purecap rule -- the reason the SSC exists) **and** an `ospecialrw SSC` traps (privilege).
+**The first version of this note overstated it and was corrected by measurement:** the compartment is
+*not* unable to spill -- an `OCS.D` through the IDC works and adds no trap. The true statement is
+narrower: **the SSC mechanism has no reachable user in the privilege configuration this design ships.**
+
+### R50. The capability register file crosses a compartment boundary intact, and the dereference checker asks no domain question
+
+**Status: MEASURED. NOT FIXED -- recorded deliberately, because the fix is a design decision about
+what a crossing owes, not a defect repair. This is larger than R48.**
+
+`OCInvoke`'s only capability-register write is the IDC install -- **c15 alone**. `OCReturn` and
+`OCJALR` write none. And the dereference checker has **zero** domain terms: `veda_pcc_object` and
+`veda_current_region` appear **0 times** in the whole access-check file.
+
+So a callee needs no authority at all -- it simply uses a register the caller left bound.
+
+**MEASURED.** The caller bound its own object into `c10`, wrote `0xC0FFEE` through it, and crossed
+without clearing anything, because **no instruction on this machine clears capability registers at a
+crossing.** Inside the callee:
+
+```
+ocl.d  s4, t1, c10        →  s4 = 0xC0FFEE,  traps taken: 0
+```
+
+**R48 closed the mint channel and left the possession channel wide open.** This must not be recorded
+as "the compartment boundary is now clean." It is not.
+
+The shipped switcher makes it concrete rather than theoretical: it holds save-area capabilities with
+Load|Store, a thread-index capability and a globals table-base capability across both crossings, so a
+resumed thread begins execution holding read/write capabilities into another thread's register save
+area.
+
+**Why it is not fixed in this increment.** The candidate answers -- clear all but the IDC, clear all
+but an argument window, or a CHERI-style register-clearing mask on the crossing -- each define an ABI,
+not just a check. Argument passing across compartments has to be designed before the boundary can
+clear registers, or every cross-compartment call becomes a trap to Machine. It needs its own
+increment, and it should come before any claim that this architecture provides compartment
+confidentiality.
+
+### R51. The region table has no software write path, so the compartment crossing has never been differentially tested
+
+**Status: MEASURED, RECORDED. Not fixed -- the fix is a new instruction, and it should be designed,
+not improvised.**
+
+Found by writing the R48 differential probe and then **reading its signature instead of trusting its
+verdict**. `p21_oda_crossing.S` reported **AGREE** -- and both layers had written **eight zero words.**
+Neither ever reached its stores.
+
+**Why.** `VEDA_OCINVOKE` requires the target domain's region to be RT-resident (R10). The region table
+is written by **exactly one thing in the entire model: `veda_test_seed_odt()`, the test fixture
+function.** There is no RT-Populate instruction -- `DESIGN_08`'s region mechanism has **no
+software-visible write path at all**, a gap the RTL mirror's own results doc named and did not build.
+The differential harness deliberately runs with `test_fixtures = false` (R24, so the suites and the
+harness cannot share a drift channel), so **no region is ever valid or resident there, and every
+OCInvoke REGION_FAULTs.**
+
+**The consequence is bigger than the probe.** `p21` is the **first probe in the suite's history to
+attempt an OCInvoke** -- verified by grepping every probe for the encoding. **The architecture's
+central isolation mechanism has no cross-layer coverage**, and could not have any until the region
+table becomes writable by something other than a fixture.
+
+**What was done.** The probe is **kept, not deleted** -- moved to `difftest/blocked/` with the reason
+in its header, ready for the day that changes. And `run_difftests.sh` now **refuses to run** if any
+file in `probes/` is missing from its expected-verdict table, because the quieter successor failure
+would have been to drop it from the table and leave the file where it sits: a test nobody runs and
+nobody misses, which is R49 in a different directory.
+
+**R48's evidence therefore lives in two fixture-enabled suites instead**:
+`sail_tests/vc_r48_oda_inherit_neg.S` and `rtl/sim/veda_smoke_r48_oda_crossing.S`, each carrying the
+same controls.
+
+**This is the seventh instance on this project of a green result that measured nothing**, and the only
+reason it was caught is a rule this register keeps re-learning: **a suite's verdict is a claim; read
+the values.**
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**

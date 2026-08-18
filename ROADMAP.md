@@ -347,7 +347,7 @@ gate -- "Sail residency/COW corpus (positive + negative + mutation), then RTL mi
 
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
-cross-layer differential suite. As of 2026-08-18: **104/104, 90/90, 51/51, 22/22**, and it now ends
+cross-layer differential suite. As of 2026-08-18: **105/105, 98/98, 51/51, 22/22**, and it now ends
 with an explicit verdict line.
 
 **Read that command's history before trusting any earlier number.** Until R46 it **could not fail**:
