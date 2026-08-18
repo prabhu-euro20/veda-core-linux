@@ -4571,6 +4571,182 @@ the first working version left the handler by **OCInvoke**, which calls `veda_cr
 `veda_trap_frame_abandon`, so the second trap nested and R12's poison stopped the machine. The bug
 needs OCRETURN specifically, and reading which crossing calls what came before the harness worked.
 
+### R61 (D7). A control asserted as a measurement, in a file that names a sibling that never existed
+
+**Status: RECORD DEFECT, CORRECTED. And D7's own two claims were both wrong about where and what --
+recorded that way, because a finding whose headline is right and whose stated cause is wrong is worse
+than no finding (R51's lesson, applied to a finding of mine).**
+
+#### What D7 said, and what was actually there
+
+D7 said `sail_tests/pending/README.md` routes the file to the **wrong decision** and cites
+`vc_r52_bind_domain_default_ctl.S`, which does not exist. Checked at source:
+
+- **The routing is correct.** The README says the file waits on re-graining the bind gate's subject
+  from region to object. Both of the file's compartments live in region 0, `veda_bind_domain_ok`
+  compares `veda_pcc_object[43 .. 24]`, and two compartments in one region are one principal by R10's
+  design. That is exactly right. **Refuted.**
+- **The phantom citation is not in the README.** It is inside
+  `pending/vc_r52_bind_by_name_neg.S:203`, which calls it a *sibling file*. **Misplaced -- and the
+  real defect is worse than the one reported.**
+
+#### The real defect
+
+The comment did not merely cite a missing file. It **reported that file's result in the past tense**:
+
+> *"PART C is the control that decides what the finding IS. It lives in the sibling file
+> `vc_r52_bind_domain_default_ctl.S`: with `veda.odt.set.domain` giving object 121 a real
+> `owner_domain`, the identical PART B **takes 2 traps and reads 0. The gate works.**"*
+
+The file does not exist anywhere in any of the three repositories, so **that measurement was never
+made**. This is the ninth instance of this register's most persistent class -- a green claim that
+measured nothing -- and it is the worst placement yet, because the sentence says outright that this
+is *the control that decides what the finding is*. A fabricated control does not merely fail to
+support a finding; it makes the finding unfalsifiable by the reader.
+
+#### What the control actually is
+
+It exists, twice, and both are landed and green:
+
+| file | what it proves |
+|---|---|
+| `sail_tests/vc_bind_domain_neg.S` | the **explicit** path: `veda.odt.set.domain` narrows object 2 to domain 7; a bind from inside a region-0 compartment traps `0x0B` and the destination comes back **untagged** |
+| `sail_tests/vc_r52_creation_domain.S` | the **creation-time default** (R52): a compartment's own object binds, a foreign compartment's is refused in exactly one trap, and the ambient object still binds -- R17's return path intact |
+
+So `veda_bind_domain_ok` is enforced and is not bypassable, and the phantom sibling was never needed:
+its job was already done by a test written earlier. The claim was not just unmeasured, it was
+**redundant**, which is why nothing ever noticed it was missing.
+
+#### Two more defects in the same file, found while verifying the first
+
+- **Wrong identity.** The header opens `R48 -- DOES A CALLEE COMPARTMENT INHERIT THE CALLER'S ODA?`
+  while the file is filed as the R52 pending test. It is a hybrid grown from the R48 scaffold; now
+  says so in its first lines instead of announcing the wrong finding.
+- **`120..106`** as an Object_ID range -- descending, impossible. The file uses 120..124.
+
+Corrected in place, all three. The file still assembles and is still **red on purpose**
+(`FAILURE: 1`), which is the contract `pending/` exists to hold.
+
+**The rule this adds:** `pending/` was created because R49 measured what happens to a test nobody
+runs. It now needs the second half of that discipline -- **nobody reads an unrun file either**, so a
+claim inside one is never contradicted by a suite. Every cross-reference in `pending/` must name a
+file that exists, and any result quoted there must name the test that produced it.
+
+### R62 (D6). `veda.odt.set.domain` wrote an unvalidated principal -- and every use of it in the corpus named one that did not exist
+
+**Status: FIXED AND COVERED ON BOTH LAYERS, with the gate measured on the shipped binary using the
+corpus's own file as the probe. Sail 112/112, RTL 101/101, ACT4 51/51, differential 25/25. Carried in
+the R57 residue as D6.**
+
+#### The refusal was already in the same function, one term away
+
+`VEDA_ODT_SET_DOMAIN` took `new_domain` straight from `rs2[19 .. 0]` and wrote it into `owner_domain`
+with no validation of any kind. Three lines above it, for the *object* half, sits this:
+
+> *"Refuse on a slot that holds nothing: a policy on a non-existent object is meaningless, and
+> allowing it would let software **pre-stage rules on slots it does not own yet, to take effect when
+> someone else populates them.**"*
+
+The identical argument for the **domain** half was never applied, and it is the stronger of the two.
+A domain **is** a region (R10). A policy naming a region that has never been configured takes effect
+when someone else is **given** that region -- so it is **authority that outlives its author.** An
+early-boot component holding a delegated ODA can stamp a future principal and then be dismissed;
+dropping its ODA unstamps nothing. That is this architecture's own temporal-safety thesis, applied to
+policy rather than to code, and it was the one place it had not been applied.
+
+#### Write-time, not read-time, and the difference is the whole finding
+
+The obvious alternative is to validate on the **read** side, in `veda_bind_domain_ok`. It does not
+work, and seeing why is what settles the design:
+
+- A read-time check makes the object **unbindable while the region is unconfigured, and bindable the
+  moment it is configured.** That is precisely the attack, arriving on schedule.
+- Only refusing the **write** prevents the stamp from being applied at all.
+
+So the check lands in `veda_domain_nameable`, called by `VEDA_ODT_SET_DOMAIN` before `odt_write`, and
+mirrored in the RTL as `$veda_domain_not_nameable` inside `$veda_odt_set_domain_violation`.
+
+`VEDA_DOMAIN_ANY` is exempt because it is **not a principal** -- it is the absence of a restriction,
+and it is what R41 and R58 reset the field to, so gating it would have broken object destruction. The
+check reads `rt_valid`, **not** `region_resident`: region 3 is seeded `{rt_valid = false,
+region_resident = true}` by R10 precisely so a check on the wrong bit cannot pass, and both tests
+name region 3 for that reason.
+
+**Machine is deliberately NOT exempt,** and this is the one arguable choice. R47's `veda_oda_denies`
+exempts Machine because that is an **authority** question and Machine holds all authority. This is a
+**well-formedness** question, like the `valid` check beside it -- which does not exempt Machine
+either -- and the ordering it imposes on a loader (configure a region before assigning objects to it)
+is one line of sequencing, not a capability anyone loses.
+
+#### What the corpus was doing
+
+Every single use of `set.domain` in the entire corpus, on both layers, **named a principal that does
+not exist**:
+
+| file | named | region state |
+|---|---|---|
+| `sail_tests/vc_bind_domain_neg.S` | domain 7 | `rt_valid = false`, never configured |
+| `rtl/sim/veda_smoke_bind_domain_neg.S` | domain 7 | same |
+| `rtl/sim/veda_smoke_odt_set_domain.S` | domain 5 | same |
+| `sail_tests/vc_odt_set_domain.S` | domain 5 | same |
+
+**Four** tests, four nonexistent principals, **not one correct usage anywhere on either layer**, and
+one of them is described in its own header as *"the test the gate did not have."* That is why the
+missing check was invisible: there was nothing to contrast against.
+
+The fourth was found by the suite rather than by me. Having re-aimed the RTL twin I recorded the
+count as three and moved on; `vc_odt_set_domain.S` came back **111/112** on the next full run. The
+count in this entry was wrong for exactly as long as it took the harness R46 fixed to disagree with
+it -- which is the argument for R46 in one line. All four are re-aimed at region 1, which is real,
+configured and resident, and each now asserts what it always meant: the executing domain is not the
+object's domain, therefore the bind traps.
+
+#### The measurement, without a rebuild
+
+The gate was measured on the **shipped** binary by taking the corpus's own canonical file and
+restoring the one immediate:
+
+```
+vc_bind_domain_neg.S naming domain 7 (never configured)  ->  FAILURE   refused
+vc_bind_domain_neg.S naming domain 1 (real principal)    ->  SUCCESS   accepted
+```
+
+Same file, same instruction, one operand apart. New tests
+`sail_tests/vc_r62_domain_nameable_neg.S` and `rtl/sim/veda_smoke_r62_domain_nameable.S` carry three
+controls each -- a real principal is accepted, the open sentinel is accepted, and a **refused write
+wrote nothing** (an ambient bind still mints, so the field still holds `ANY` and not 3) -- so a
+machine that simply refused every `set.domain` cannot pass either.
+
+On the RTL the gate was additionally measured by **stripping its term from a copy of the generated
+Verilog**: with `CPU_veda_domain_not_nameable_a0` removed from
+`$veda_odt_set_domain_violation`, the region-3 write is **accepted** and the test's sentinel is never
+set. (The two later sentinels also read zero in that run, but those are **unwritten registers, not
+measurements** -- the first failing check jumps to the end. Stated because the identical masking in
+the D5 run needed a second variant to see past, and a zero that means "never ran" reads exactly like
+a zero that means "measured zero".)
+
+**The first attempt at this check measured nothing at all**, and is recorded because the failure mode
+is specific to this toolchain: the strip targeted `CPU_veda_domain_not_nameable_a1`, the pipeline
+stage the source signal is *consumed* in, which does not appear in the generated file. The edit
+silently changed nothing and the run passed, looking exactly like a successful control. **A vacuity
+check that itself does nothing is the worst possible artefact**, because it manufactures confidence
+in both directions -- the strip must be confirmed to have landed before its result means anything.
+
+**And my own first draft was vacuous, in the register's most familiar way.** The trap-count
+assertions read `li t4, N` / `bne x29, t4, fail` with `x29` as the trap counter -- and **`t4` IS
+`x29`**, so every one of them compared the counter against itself. It surfaced only because a wrong
+`cgettag` encoding trapped and the trace showed `addi x29, x0, 0x2` where the source said `t4`.
+Tenth instance of a green check that measured nothing, and the first caused by an ABI-name alias.
+
+#### Residual, stated and not closed
+
+This stops a policy naming a region that has **never existed**. It does **not** stop one naming a
+region that existed, was torn down, and was re-issued to a different principal -- the region-level
+twin of the object generation counter. `region_generation` is already in the region table and is the
+mechanism that would close it, but `owner_domain` has 20 bits and no room to carry one, so it needs a
+**field change rather than a check**. Recorded as **UNMEASURED**: no RT-teardown instruction exists
+yet, so the case is currently unreachable, and R56 decided against adding one.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
