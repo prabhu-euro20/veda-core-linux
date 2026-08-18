@@ -4475,6 +4475,102 @@ domain from inside a compartment (domain violation), then bind it again from the
 under the bug the first, *trapping* bind rewrote the owner to `MHARTID` and the second succeeds. It
 needs a compartment scaffold; recorded as **unmeasured** rather than claimed.
 
+### R60 (D5). The CRBR saved shadow was released by no exit OCRETURN takes, and installed by any later xret
+
+**Status: MEASURED ON BOTH LAYERS BEFORE THE FIX, THEN FIXED AND COVERED ON BOTH. Sail 111/111,
+RTL 100/100, ACT4 51/51, differential 25/25. A design gap, not
+a divergence -- the two layers agreed, and agreed on the wrong thing. Carried in the R57 residue as
+D5, described there as "currently UNREACHABLE"; it is reachable, and this entry replaces that
+assessment with a measurement.**
+
+#### Three facts that only compose into a bug
+
+Each is correct on its own and each is deliberate, with a written reason:
+
+1. `veda_crbr_save_and_reset` captures **only** when `veda_current_region != 0`. Region 0 needs no
+   save because the reset target *is* region 0, so a restore-to-0 would be the identity.
+2. `veda_trap_frame_abandon` -- which **OCRETURN** calls, and which nothing else calls -- releases
+   `veda_trap_depth`, `veda_mepcc_base`, `veda_mepcc_length`, `veda_mepcc_object` and
+   `veda_trap_poison`. It does **not** release `veda_saved_region`.
+3. `veda_crbr_restore_on_xret` fires on the **sentinel alone**: no depth term, no owner term, and it
+   is called **outside** the mepcc depth guard -- deliberately, so the two disciplines stay
+   individually self-consuming.
+
+Compose them and the machine has a slot that **one exit fills and only the other exit empties.**
+OCRETURN is not an obscure path: it is the architecture's *second* exit from a trap handler and the
+**only** one the shipped switcher takes (`runtime/veda_sched_asm.S`), because narrowing PCC with
+`csrw` and then falling through to an `mret` requires *fetching* that `mret`, which by then lies
+outside the just-narrowed bounds. The design comment for `veda_trap_frame_abandon` says exactly this,
+and the frame was abandoned on that reasoning while the shadow beside it was not.
+
+#### What it does, measured
+
+A region-1 compartment traps. The handler leaves by OCRETURN. `saved_region` stays 1. Then **any
+later `mret` -- taken by unrelated region-0 code, for an unrelated reason -- installs region 1.**
+Sail instruction trace on the unfixed model:
+
+```
+[60] ocinvoke c3, c4   CSR veda_current_region -> 1        entered the compartment
+[64] ecall             CSR veda_current_region -> 0        handler in the root domain
+                       CSR veda_saved_region   -> 1        captured
+[72] ocreturn c8       CSR veda_current_region -> 0        frame abandoned...
+                       CSR veda_saved_region   -> 1        ...shadow was NOT
+[77] ecall                                                 unrelated region-0 trap: no capture
+[83] mret              CSR veda_current_region -> 1        <-- STALE REGION INSTALLED
+```
+
+The RTL is the same machine: `$veda_saved_region` had reset, trap-capture and `mret` arms and **no
+OCRETURN arm**. Measured on the unfixed hardware, with the intermediate assertion lifted so the run
+reaches the second half: `after the OCRETURN exit: saved=0x1` and `after an unrelated mret:
+region=1`. Identical failure, identical fix.
+
+#### What leaks
+
+`veda_region_is_resident` **exempts the current region** -- the CRBR is loaded only through validated
+paths, so the region it names is resident by construction. With a stale CRBR that construction is
+false, and the exemption grants the stranded region unconditional residency, bypassing both
+`region_resident` and the `rt_valid` check **R55 put on `veda.bind`'s minting path**. So this
+directly weakens the gate R55 closed one increment earlier.
+
+It is **not** an authority escape by itself: the bind gate's subject is `veda_pcc_object`, which the
+stale CRBR does not change. Recorded as an **R10 residual** -- promoted, not created, by R57's
+verdict (B).
+
+#### The fix, and why it sits where it does
+
+A new `veda_crbr_release()` beside `veda_crbr_restore_on_xret`, called by OCRETURN immediately after
+`veda_crbr_load`. Two choices were available and the reasoning picked the second:
+
+- Fold it into `veda_trap_frame_abandon`'s depth-zero guard, alongside the mepcc release.
+- Put it on the **CRBR side, unconditional**.
+
+**Unconditional, on the CRBR side.** The justification is *supersession by the operand* -- OCRETURN
+calls `veda_crbr_load` and installs the region from `cs1`, so a saved region is superseded by
+definition, which is verbatim the argument `veda_trap_frame_abandon`'s own comment already makes for
+PCC -- and that argument **does not depend on the depth bookkeeping being right**. Folding it into
+the depth guard would have made a CRBR property contingent on the mepcc frame's counter, which is
+precisely the coupling the restore path is deliberately written to avoid.
+
+#### Coverage
+
+`sail_tests/vc_d5_crbr_shadow_leak.S` and `rtl/sim/veda_smoke_d5_crbr_shadow_leak.S` + testbench,
+both built from the passing R10 round-trip scaffold with **exactly one change**: the handler leaves
+by OCRETURN instead of `mret`, and an ordinary region-0 `ecall`/`mret` pair follows. Both assert the
+release *and* the consequence, both carry the entry controls (start in region 0 with an empty
+shadow; the shadow really did capture in the handler), and the RTL half was **shown to fail with the
+fix stripped from a copy of the generated Verilog** -- the finding half directly, and the consequence
+half on a variant with the masking assertion lifted.
+
+**A note on the scaffold, because it cost most of the time.** Four hand-built harnesses produced
+values that were not measurements: an HTIF payload packed past 47 bits, a `report` block a patch
+script had mangled, and two runs whose disagreeing numbers were my own bit-packing rather than the
+model. The finding was only nailed down by `--trace-instr --trace-csr`, which reads the machine
+instead of my arithmetic. **Building from a known-passing scaffold and reading the CSR trace should
+have been the first move, not the fifth** -- and the fourth of these was the exit choice itself:
+the first working version left the handler by **OCInvoke**, which calls `veda_crbr_load` but *not*
+`veda_trap_frame_abandon`, so the second trap nested and R12's poison stopped the machine. The bug
+needs OCRETURN specifically, and reading which crossing calls what came before the harness worked.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
