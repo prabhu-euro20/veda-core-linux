@@ -4363,6 +4363,80 @@ time is a shipped architecture, not an unfinished one -- so the reset seeding is
 stand-in**, and this project already recorded that as a deliberate scope decision when it left the
 ODT seeding outside the fixture switch.
 
+### R57. Is the REGION the right grain for a domain? -- VERDICT (B), and the entry that was missing
+
+**Status: DECIDED (B). AND THIS ENTRY DID NOT EXIST UNTIL NOW.** R57 was cited four times in this
+document -- *"the R57 adversarial pass"*, *"carried in the R57 residue as D5"*, *"the R57 residue as
+D6"*, *"promoted, not created, by R57's verdict (B)"* -- while `### R57` had no heading anywhere in
+any of the three repositories. Its three residue items were each measured, fixed and written up
+(R60, R61, R62), all of them describing themselves as residue **of a finding the register did not
+contain**. Second occurrence of the class the 2026-08-18 register-integrity audit caught, and the
+first one that is mine.
+
+#### The question
+
+R10 made the region field of an Object_ID the domain identity. R52 then found that the bind gate
+compares `owner_domain` against `veda_pcc_object[43 .. 24]` -- **the region** -- so two compartments
+that share a region are one principal, and no amount of register-clearing at the crossing changes
+that. R57 asked the architectural question directly: **is the region the right grain, or must the
+domain identity be re-grained to the object?**
+
+Two answers were possible:
+
+- **(A) Re-grain to the object.** `owner_domain` would have to hold a 44-bit identity in a 20-bit
+  field, so this is a format change, not a check. Every compartment becomes its own principal.
+- **(B) The region IS the architecture.** Domains are established at load time by a trusted loader,
+  compartments within a region are deliberately one principal, and the grain is a decision rather
+  than a limitation.
+
+#### The verdict: (B), on precedent and on cost
+
+**(B).** The precedent is strong and was checked rather than recalled: seL4's `KernelNumDomains` is a
+compile-time constant and the only runtime authority moves a thread between *existing* domains;
+CHERIoT's compartments are established by a loader that then erases its own authority. **A machine
+whose domains are fixed at load time is a shipped architecture, not an unfinished one.** (A) costs a
+capability-format change for a property (B) obtains by convention plus one loader.
+
+#### But (B)'s escape hatch is false on the shipped machine, and that is what the residue was
+
+(B) is only sound if the loader's region grants are real. R57 recorded three premises to check and
+they became this register's next four entries:
+
+| premise | outcome |
+|---|---|
+| the CRBR shadow is released by every exit | **FALSE** -- R60 (D5), measured on both layers, fixed |
+| `set.domain` names a principal that exists | **FALSE** -- R62 (D6), measured, fixed |
+| `pending/`'s routing and citations are sound | mostly true; R61 (D7) corrected a fabricated control |
+| **region grants are enforced somewhere** | **FALSE, and worst of the four** -- R63 below |
+
+**R63 is the one that decides whether (B) can be written down at all.** A domain grant that no
+instruction checks is not a grant; and until R63 there was no point in the machine where naming a
+region cost anything on the write path.
+
+#### What (B) still owes, stated as a contract
+
+1. **A named holder.** The loader owns region creation. Today the region table is seeded at reset,
+   which R56 correctly defends as a legitimate loader stand-in -- but the contract has to say so
+   rather than leave it implicit in an `initial` block.
+2. **Region 0 is reserved for the ambient context.** Verified as already true by construction, not
+   by rule: `veda_crbr_save_and_reset` resets the current region to 0 unconditionally on every trap,
+   `veda_region_table[0]` is seeded `{rt_valid, region_resident, base 0}` on both layers, and
+   `veda_creating_domain` returns `VEDA_DOMAIN_ANY` when `veda_pcc_object == VEDA_OBJECT_NONE`. The
+   contract must state it so a future RT-write cannot quietly repurpose region 0.
+3. **`region_entry` has no length.** Verified at source, both layers: the struct is
+   `rt_valid, region_odt_base, region_resident, region_backing, region_generation` and nothing else.
+   A region's ODT extent is bounded only by `VEDA_LOCAL_MODELED`, a **modeling** constant. At the
+   architected 24-bit local width region 0 would span `[0, 2^24)` and swallow region 1 entirely.
+   **The shipped layout is disjoint because of a modeling artifact, not an architectural invariant**
+   -- R56 found this and it remains the single largest unclosed premise under (B).
+4. **Region-grant authority at Populate** -- closed by R63 in its minimal form (you may not name a
+   region that does not exist). Its strong form -- *you may only populate into your own region,
+   unless you hold an explicit grant* -- is **NOT built**, because it needs the grant object in
+   premise 1, and the ambient loader legitimately populates into region 1 today.
+
+**Recorded as still owed, not as done.** Premises 1 and 3 are open; premise 2 is verified-true but
+unwritten; premise 4 is half-closed.
+
 ### R58. My own R52 landing hit the wrong two clauses, and 108/108 did not notice
 
 **Status: SELF-INFLICTED, FOUND BY AN ADVERSARIAL PASS AND NOT BY THE SUITE, THEN CORRECTED AND
@@ -4746,6 +4820,113 @@ twin of the object generation counter. `region_generation` is already in the reg
 mechanism that would close it, but `owner_domain` has 20 bits and no room to carry one, so it needs a
 **field change rather than a check**. Recorded as **UNMEASURED**: no RT-teardown instruction exists
 yet, so the case is currently unreachable, and R56 decided against adding one.
+
+### R63. The region half of an Object_ID was an identity on the read path and a bare index on the write path
+
+**Status: MEASURED ON THE SHIPPED MODEL, THEN FIXED AND COVERED ON BOTH LAYERS. Sail 113/113, RTL
+102/102, ACT4 51/51, differential 25/25. Found while verifying R57's premises in order to write R57
+down -- the register repair produced the finding.**
+
+#### The asymmetry
+
+R10 states that the region field of an Object_ID is *"the unforgeable domain identity"*. R55 made
+that true on the **read** path: `veda.bind` checks `veda_region_is_resident` (`rt_valid &
+region_resident`) before it looks anything up. Nothing ever made it true on the **write** path.
+`VEDA_ODT_POPULATE`'s gates are, in full: Machine-or-ODA, the executing pin, the ODA window, and
+`retired`. **Not one of them reads either RT bit.** So `veda_odt_index` resolved any in-window region
+number, configured or not, straight through `veda_odt_base_of` -- which also does not consult
+`rt_valid`.
+
+Regions 4..7 are reset to `region_odt_base = 0` on both layers, and **that is region 0's base**, so
+the `local` half alone picked the slot.
+
+#### Measured, by instruction trace, before the fix
+
+```
+populate {region 5, local 200}   ->  0 traps, ACCEPTED
+bind     {region 0, local 200}   ->  tag 1, CGetBase = 0x80000100 = the prober's own arena
+bind     {region 5, local 200}   ->  trap, cause 0x09 REGION_FAULT
+```
+
+**A live descriptor written under a name the machine then refused to let its own author read.** After
+the fix the same probe returns tag 0 and Base 0, and the populate traps.
+
+#### This corrects R56
+
+R56 recorded the aliasing -- *"Four regions already alias region 0's entire descriptor namespace at
+reset"* -- and named the barrier: *"the only thing between a foreign compartment and every unnarrowed
+descriptor in region 0 is one bit -- `rt_resident[4] == false`. Setting that bit is exactly what an
+RT-Populate does."*
+
+**The Populate path reads neither RT bit, so that bit was never the barrier and no new instruction
+was ever required.** R56's *conclusion* (do not build a naive RT-Populate) stands and is if anything
+strengthened. Its *mechanism* was wrong, and a mechanism claim that names the wrong bit sends the
+next reader to guard the wrong thing.
+
+#### What it is, and what it is not -- stated plainly
+
+**Not an authority escalation.** Every ODT writer is already bounded by the ODA window (R47), and an
+actor that can write `{5, L}` can write `{0, L}` with the identical check, so it gains no memory it
+did not already have. What it breaks is **namespace integrity**: one slot with several
+legitimate-looking names, and the two halves of the architecture disagreeing about whether the region
+field means anything. It also **falsifies R10's headline claim as stated** -- the region field was
+unforgeable only at use, never at creation.
+
+It is recorded and fixed rather than deferred because it is a landmine under everything queued next:
+the `backing` field, any RT-write instruction, and R57's verdict (B), whose entire soundness rests on
+region grants being real.
+
+#### The fix, in two halves, and why the first one alone was wrong
+
+**Half one, the choke point.** `veda_odt_index` -- which every ODT access of either direction passes
+through -- now requires `rt_valid` for any non-current region. The intra-region fast path is
+deliberately exempt: a crossing has already validated the current region (R10/R55), and re-reading
+the RT for it would be circular by `veda_crbr_load`'s own argument.
+
+**Half one alone was a bug, and it was measured as one.** `odt_write`'s `None()` arm is `()`, so a
+gated write became a **silent no-op**: the instruction retired reporting success while nothing
+happened. That is exactly R14's class (*"Populate and Destroy refused SILENTLY -- the RTL never told
+anyone"*). The first R63 test failed for precisely this reason, and the trace showed the populate
+retiring normally.
+
+**Half two, the refusal.** All **seven** ODT writers -- Populate, Populate-Fast, Destroy, Set-COW,
+Set-Domain, Page-Out, Page-In -- now ask `veda_region_nameable(object_id)` directly and raise
+`Illegal_Instruction`. Illegal rather than a `REGION_FAULT` via `veda_trap`, for a concrete reason:
+`veda_trap` packs a **capability** index into `mtval`, and these instructions' `rd` is a plain GPR,
+so the cause would arrive with a meaningless register field. Every other refusal these seven raise is
+already `Illegal_Instruction`, so this keeps one shape. On the RTL, five of the seven inherit the
+term through `$veda_odt_valid`; **Destroy does not**, because it is deliberately ungated on validity
+(an invalid slot's generation still needs protecting), so it carries the term itself.
+
+Each of the seven Sail edits was anchored **on its own clause by name**, not by ordinal -- R58 is why.
+
+#### What the corpus was doing, again
+
+`vc_r55_bind_rt_valid_neg.S` **wrote the gap down and then depended on it**, one increment before it
+was found:
+
+> *"Populate does not consult the region table at all -- only `veda_odt_index`'s window bounds -- so
+> all three of these succeed regardless of `rt_valid` or residency, and that is what makes the Bind
+> results below attributable to the Bind gate alone."*
+
+True, load-bearing, and a finding. The file is re-aimed: its region-3 seed is now expected to be
+refused, and its four trap-count assertions are bumped -- each edit anchored on the `li t4, N` whose
+**next line compares the trap counter**, because the same literal also appears before tag compares.
+
+#### Residual, recorded rather than dropped
+
+R55's finding was that a bind into region 3 **minted a live capability**, and that demonstration
+needed a real entry in region 3's ODT space. **R63 has made that state unreachable by software.** The
+test can still prove the bind is refused; it can no longer prove what it would otherwise have minted.
+That is a fix working, not coverage lost -- the bind gate is now defence-in-depth against a state
+only a corrupt or half-torn ODT could produce, which is exactly the state R10 seeded region 3 into
+and exactly why it did. Restoring the severity demonstration needs a **reset fixture**, the technique
+R59 had to use for `owner_hart` for the identical reason. Recorded as **UNMEASURED**.
+
+**Also open, and now sharper:** R63 closes the minimal form of region-grant authority -- *you may not
+name a region that does not exist*. The strong form -- *you may populate only into your own region
+unless you hold an explicit grant* -- is **not built**, because the grant object does not exist and
+the ambient loader legitimately populates into region 1 today. See R57, premise 4.
 
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
