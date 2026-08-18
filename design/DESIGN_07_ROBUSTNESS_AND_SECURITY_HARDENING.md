@@ -4009,6 +4009,205 @@ same controls.
 reason it was caught is a rule this register keeps re-learning: **a suite's verdict is a claim; read
 the values.**
 
+### R50 increment 1 (OCLEAR). The architecture assigned a duty and shipped no tool for it
+
+**Status: BUILT AND VERIFIED ON BOTH LAYERS. Sail 106/106, RTL 98/98, ACT4 51/51, differential 24/24.
+The crossing rule itself is increment 2 and is deliberately NOT in this increment -- see the
+sequencing below.**
+
+R50 measured that the capability register file crosses a compartment boundary intact. The
+conventional answer, and real CHERI's, is that a **trusted switcher clears the registers it is not
+passing**.
+
+**THIS MACHINE COULD NOT DO THAT.** There was **no instruction that reliably zeroes a capability
+register's value.** Every soft-fail in the derivation family -- OCA, CSetBounds, CAndPerm,
+Rebind-on-sealed -- clears the **tag** and carries the source's fields **verbatim**. The only writes
+of `zero_capability` outside reset are Bind's two *miss* arms, and reaching them requires the ODT
+lookup to miss or be wrong-hart; on a **valid, resident, openly-bindable** slot that instruction
+**succeeds and installs a fully-permissioned capability instead of clearing.** `veda.bind.notrap` is
+a probe whose failure mode happens to look like a clear.
+
+> **The architecture had assigned a duty and shipped no tool for it.**
+
+**OCLEAR**: Custom-2, funct3 `001`, funct7 `0011000` (next free, verified by enumerating every
+`0b001` encdec). A 16-bit mask in an ordinary GPR; bit *i* clears capability register *i*.
+**Unprivileged** -- dropping authority you already hold is monotone, and requiring privilege to give
+something up is exactly what made R48 unclosable in software.
+
+#### Two decisions that look like details and are not
+
+- **It clears the VALUE, not just the tag** -- and this **deliberately overrides R48's own
+  "tag only, never the value" discipline.** R48's justification was that every ODA consumer routes
+  through `veda_oda_authorized()`, whose first term is the tag. **That is true of the ODA and false
+  of the capability register file**: the query family is deliberately un-gated -- no tag check, no
+  seal check, no bounds check -- so an *untagged* register still answers `CGetBase` with the **raw
+  physical Base**, the disclosure this codebase says must never reach software. **This project
+  already paid for that once, as RTL-14.**
+- **The cleared `otype` is `0xFFFF`, not zero.** `isSealedCap` tests `otype != UNSEALED_OTYPE`, and
+  **Rebind tests `isSealedCap` on its DESTINATION with no tag conjunct** -- so an all-zeros clear
+  would leave every cleared register **permanently un-Rebindable**, while its tag read 0 either way
+  and every tag assertion in the corpus stayed green. **That is R24 re-created**, and it is the exact
+  shape of failure this register keeps recording. Bind's own miss arms already write
+  `zero_capability` for this reason; the test asserts a successful Rebind after a clear.
+
+#### Why an instruction, and not just a rule at the crossing
+
+The crossing rule is increment 2. This one is **independently necessary**, for a reason no crossing
+rule can ever cover: **the trap path is a fourth compartment entry that no crossing rule reaches.**
+The shipped switcher points `mtvec` at itself, is entered by a thread's `ecall`, and then
+**dereferences capabilities bound before any crossing from inside its own handler.** Capability
+registers surviving a trap is **load-bearing shipped behaviour**. On the one entry hardware cannot
+police, an explicit clear is the only tool there is.
+
+#### The GPR question, decided
+
+**Hardware does not clear general-purpose registers at either crossing.** R48's rule is not
+"hardware beats software" -- it is a **capability-of-the-caller** argument, and its premise is
+falsifiable per channel. For the ODA it holds (`OSpecialRW` is Machine-only). For the capability
+register file it held until this increment (no clearing instruction existed). **For GPRs it is
+false**: `mv xN, x0` is one unprivileged, always-available base-ISA instruction, and the shipped
+switcher already executes exactly that. A hardware GPR clear is also **structurally impossible**, not
+merely expensive: inside a live compartment every ordinary load and store hard-traps under the
+purecap rule, so a compartment entered with cleared GPRs, a cleared SSC and a cleared ODA would have
+**no input channel in either direction**. The asymmetry is R48's rule working, not being abandoned.
+
+#### Sequencing, and what increment 2 owes
+
+**OCLEAR → R52 → the implicit crossing clear.** R52 must come in between, because increment 2's
+cost is only honest once re-binding by name is gated -- **R52 measured that a callee needs only the
+Object_ID, so clearing registers without it is theatre.** And increment 2 needs a **caller-supplied
+retain mask**: the corpus's need is not a fixed window -- ten programs need exactly `c2`, six need
+exactly one sentry -- and **no register subset exists that can be cleared while breaking nothing.**
+
+**Candidate (D), retention as a property of the entered code capability, was my own proposal and is
+REFUTED in both forms.** In `flags`: `odt_entry` has **no flags member**, Bind mints `flags = zeros()`
+unconditionally, and **the RTL zeroes flags on every derivation while Sail carries it** -- so a retain
+bit there would be alive on the specification layer and dead on the implementation, on the exact
+instruction pair that mints and consumes a sentry. In `Perms`: Populate writes Perms **unmasked** from
+a GPR under an authority R47 scopes to **memory only**, so any delegated ODA holder mints the retain
+right on every object in its window.
+
+### R53. CSetBounds was computed at the pre-widening widths, and the window check validated the truncated request
+
+**Status: MEASURED, THEN FIXED AND VERIFIED. Cross-layer, and the differential suite had missed it
+for twenty increments because no probe had ever exercised CSetBounds above 16 bits.**
+
+Three sites in the RTL, not two:
+
+```
+$veda_csetbounds_new_base[31:0]   = base + offset          -- operands are 56 and 40 bits
+$veda_csetbounds_new_length[15:0] = $rs2_data[15:0]        -- Sail takes new_length[39..0]
+$veda_csetbounds_window_ok        = ... {48'b0, $rs2_data[15:0]} ...   -- checks the TRUNCATED request
+```
+
+The operands beside them were already wide and the results are consumed into `$base[55:0]` and
+`$length[39:0]`, so the narrowing happened **here and nowhere else** -- a site increment 3's
+capability-format widening missed. **The comment directly above the third site knows the widths
+changed** ("Offset/Length are 40 bits now while rs2_data is 64") and fixes the *comparison* domain
+while still slicing the *operand* to 16.
+
+**MEASURED across the layers**: a CSetBounds requesting `Length 0x10000` on an unbounded parent gave
+**`0x00010000` on Sail and `0x00000000` on the RTL.** Both controls -- a request of `0x40`, and the
+parent's own Length read before any derivation -- **agreed on both layers throughout**, so the probe
+measures the width and not a broken CSetBounds.
+
+**Severity, split honestly.** The Length half was **fail-closed** (a truncated-to-zero Length grants
+nothing), so it is a correctness divergence rather than an escape -- a program correct against the
+specification failed on the hardware. **The Base half is not fail-closed**: above 4 GiB the sum wraps
+and the capability names different memory. That half is **UNMEASURED** -- this testbench's memory map
+cannot reach 2^32 -- and is recorded as unmeasured rather than claimed.
+
+**The third site is the interesting one.** Because the check validated the truncated request, a
+request above `0xFFFF` **passed as zero and stored zero** -- silently minting a useless capability
+instead of refusing. It is now computed **65 bits wide**, because offset is 40 and the request is 64
+and at 64 bits a huge request **wraps to a small sum and passes**. That is R18 for the fourth time.
+
+### R52. A name is still full authority -- the bind gate's default is open, and that makes clearing registers at the crossing theatre
+
+**Status: MEASURED, WITH ITS CONTROL. NOT FIXED -- the fix is a policy decision this design
+deliberately deferred once and has never taken, and the previous attempt at it was retracted the same
+day for making compartments one-way.**
+
+R50's obvious fix is to clear the capability register file at the crossing. **That fix would achieve
+nothing**, and the measurement says so directly. In the reproduction the caller does **more** than any
+such fix would do for it -- it untags its own capability register **before** calling:
+
+| | traps | value the callee read |
+|---|---|---|
+| `owner_domain = VEDA_DOMAIN_ANY` -- **what every Populate writes** | **0** | **`0xC0FFEE`** |
+| `owner_domain` actually set with `veda.odt.set.domain` | **2** | `0x0` |
+
+The callee did not need the register. It needed **the name** -- and an Object_ID is a small integer
+it can enumerate. **The gate is sound; its default is open.**
+
+```
+veda_bind_domain_ok(owner_domain) =
+     owner_domain == VEDA_DOMAIN_ANY      -> true    <-- every Populate writes ANY (R41)
+     veda_pcc_object == VEDA_OBJECT_NONE  -> true    <-- the ambient context (R34)
+     otherwise: owner_domain == veda_pcc_object[43 .. 24]
+```
+
+Three arms, **two fail-open**. The gate bites only on an object somebody deliberately narrowed.
+
+**THIS WAS A DELIBERATE DEFERRAL, AND THE SOURCE SAYS SO** -- the `odt_entry` comment: *"Every object
+is created that way, so this field changes nothing until software deliberately narrows an object --
+**mechanism first, policy second**. The retracted R17 proved why that order matters: a rule applied by
+default broke the return path and made compartments one-way."* **The mechanism was built. The policy
+has never been taken**, and R50's measurement is what makes taking it urgent: without it, compartment
+isolation for data objects does not exist, and the R50 fix cannot buy anything.
+
+**R17's retraction already named the replacement**, and it is now buildable: *"the unit that needs
+permission is the OBJECT, not the domain, because legitimate sharing is per-object and crosses domains
+by design... an object can then be marked shareable while its neighbours are not. That is the
+direction to take, and it needs the ODT field-write path."* **That path was built** --
+`veda.odt.set.domain`, and the control above is exactly it working.
+
+**Candidate policy, checked against the very test that killed R17** (`vc_r10_crbr_invoke_trap_return.S`):
+objects populated **inside** a compartment default to that compartment's domain; objects populated in
+the **ambient** context default to ANY. That test passes under it for **two different and correct
+reasons** -- its objects 41/42 are created inside region 1 and bound from region 1, and its type
+authority 40 was created ambient and stays shareable.
+
+**Two things it does not fix, stated rather than discovered later.** Ambient-created objects --
+including type authorities -- stay bindable by any compartment. And the gate is **region-grained**
+(`veda_pcc_object[43 .. 24]`) while the compartment identity is the full **44-bit object**, so two
+compartments in one region are one principal; with no region-table write path (R51) essentially
+everything lives in region 0. **Re-graining the subject from region to object is a prerequisite the
+title of this finding does not mention.**
+
+**Must be measured against the whole corpus before shipping.** R17 passed all 77 RTL tests and then
+sent one Sail test into an infinite loop.
+
+### R54. Two verification runs at once silently corrupt each other's results -- and R46 is what caught it
+
+**Status: MEASURED (on myself, this session). FIXED with a lock.**
+
+Two `verification.sh` runs were started concurrently by mistake. They share `rtl/sim/` and the
+`difftest/` artifact directory, so they overwrite each other's `.vvp`, `.hex` and `.sig` files
+mid-flight. One of them reported:
+
+```
+  Sail self-check   : 106/106 passed
+  RTL milestones    :  51/51  passed      <-- the true number is 98
+  Cross-layer diff  :   5/24  as expected <-- the true number is 24
+  VERDICT: NOT VERIFIED
+```
+
+while the other, at the same moment, reported the true 106/98/51/24 and passed.
+
+**Before R46 this would have printed a smaller number and exited 0.** The whole failure would have
+been a count nobody compared -- which is the exact shape R46 and R49 were about. So the first thing
+to record is that **the fix worked**: the entry point refused to certify a run it had corrupted.
+
+But *visible* is weaker than *impossible*. The suites write into fixed paths with no interlock, so a
+second run is not a slow run -- it is a **wrong** run, in either direction. `verification.sh` now
+takes an exclusive lock and **refuses to start** while another run holds it, naming the holder.
+
+**And the deeper point, which is mine and not the harness's:** this is my own recorded rule
+(*"while a sweep runs, that tree is not a source of truth for any reader"*) applied from the
+writer's side and violated by me. A measurement taken while another process is mutating the same
+tree is not a measurement. The lock makes that unavailable rather than merely discouraged.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
