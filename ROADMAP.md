@@ -295,6 +295,60 @@ Two findings rejected on verification (recorded so they are not re-raised): ODT-
 already isolated from base-ISA stores by construction; TCM static placement already covers the
 same-hart cross-compartment case (no flush needed).
 
+## Hardening found by BUILDING it -- R10..R43, and why this section exists
+
+**The section above records the 2026-08-11 red-team pass, which reasoned over DESIGN_00-06 and
+produced R1..R9 plus Rev-A..Rev-F. It is intact and still correct. It is also only a third of the
+register.** Implementing the design produced **thirty-four more findings, R10 through R43**, and they
+are a different kind: the red-team pass found things by *reading the design*, while these were found
+by *running the two layers against each other* and by adversarially attacking what had just been
+built. Several were exploitable. **None of them could have been predicted from the documents alone**,
+which is the argument for keeping the Sail model and the RTL as two independently-written layers with
+a differential harness between them.
+
+**All forty-three live in `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which now runs
+R1..R43 with no gaps.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
+R18, R25, R27, R28 -- and **three of them were shipped, verified hardware fixes**, two of exploitable
+class, invisible because they had landed under a parallel `RTL-n` numbering or been co-committed under
+another finding's heading. They are entered now.
+
+**The shape of what implementation found, as a class** -- worth stating because it predicts where the
+next ones will be:
+
+- **Fail-open where the model is fail-closed.** The Sail model refuses unallocated encodings by
+  construction; the RTL had no such mechanism and executed them (R30), returned zero for undefined
+  CSRs (R32), and ignored reserved-zero fields (R30(b)).
+- **A refusal raised, and the effect happening anyway.** R21 and R28 are the same shape: the trap
+  fired and the write landed.
+- **Permissions that exist, are attenuable, are reported attenuated, and govern nothing.** R40 --
+  `PERM_LOAD_CAPABILITY` and `PERM_STORE_CAPABILITY` were never read by any check, so a delegation
+  attenuated to *data only* could lift a live capability out of the bytes it was allowed to read.
+- **Arithmetic the model cannot express.** R18 -- the bounds check wrapped at 64 bits; Sail's
+  `unsigned()` is arbitrary-precision and could not have the bug.
+- **A justification that expired without anything sending a reader back to it.** R36 -- the custom
+  privilege-drop instruction was justified by "this core has no trap to return from", and Milestone 9
+  built the traps twenty-seven milestones before anyone re-read the sentence.
+- **A test that names a weakness and then pins it as the contract.** Three separate times this pass:
+  R27's CSR test, `vc_check_order.S` PHASE D, and `vc_ocl_ocs_c.S`, each green while demonstrating the
+  gap it was written to exercise.
+
+**Still open, honestly** (both entered in DESIGN_07 rather than left in a task list): **R42** --
+`PERM_GLOBAL` and `PERM_STORE_LOCAL_CAPABILITY` are allocated and enforced by neither layer; they need
+a local-vs-global capability distinction this architecture does not have, and the specification's
+cause table now says "Allocated, NOT enforced" rather than claiming Active. **R43** -- `Rebind` does
+not enforce the "already-bound" precondition its own specification describes.
+
+**Phase 2 status, measured.** `resident`, `cow`, the residency and copy-on-write faults, the
+page-out/page-in pair, the per-object bind gate and the segmented-Object_ID trilemma decision
+(DESIGN_08) are all built and mirrored on both layers. **The one Phase 2 item still unbuilt is
+`backing`** -- the ODT entry carries `valid`/`generation`/`owner_hart`/`retired`/`resident`/
+`owner_domain`/`cow` and no `backing` field, so `mmap(file)` has no mechanism yet. Phase 2's stated
+gate -- "Sail residency/COW corpus (positive + negative + mutation), then RTL mirror" -- is met.
+
+**Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
+runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
+cross-layer differential suite. As of 2026-08-18: **102/102, 90/90, 51/51, 20/20.**
+
 ## Immediate next actions (in order)
 
 1. **DESIGN_08_THROUGHPUT_AND_MEMORY_SYSTEM.md** -- the MSA object-prefetch/streaming design
