@@ -960,10 +960,64 @@ re-bind.
 
 ### R40. Four permission bits the specification declares Active are enforced by neither layer
 
-**Status: MEASURED ON BOTH LAYERS BY EXHAUSTIVE ENUMERATION, NOT SAMPLING. Recorded, not yet fixed --
-the fix touches the same two dereference checkers R38 just changed, and one of the four needs a design
-decision the machine cannot express yet. Found while grounding R38, and confirmed independently by a
-reader that had not been told to look for it.**
+**Status: THE SEVERE PAIR IS FIXED AND VERIFIED ON BOTH LAYERS -- 0x14 PERMIT_LOAD_CAPABILITY and
+0x15 PERMIT_STORE_CAPABILITY. The escape was DEMONSTRATED before it was closed. The other two, 0x10
+GLOBAL and 0x16 PERMIT_STORE_LOCAL_CAPABILITY, are deliberately NOT built and the specification table
+now says so instead of claiming they are Active.**
+
+**THE ESCAPE, RUN RATHER THAN ARGUED.** `sail_tests/vc_r40_cap_perm_enforce_neg.S` was written first
+and bisected stage by stage against the un-fixed model, so that "it failed" could not be confused with
+"the setup was wrong":
+
+| stage | before the fix |
+|---|---|
+| setup + control: the owner spills a capability naming a secret object and reads it back | **SUCCESS** -- tag 1, Object_ID 771, zero traps |
+| `CAndPerm` clears bit 4 and keeps bit 2 | **SUCCESS** -- the attenuation is real and visible to `CGetPerm` |
+| `OCL.C` through that data-only view | **FAILED at the tag assertion** -- a live, tagged capability was lifted |
+
+**A delegation the machine accepted as "data only" handed over authority over an object it was never
+given.** After the fix the same three stages pass, and the refusal carries cause 0x14 with the
+dereferenced capability's index -- not the destination's, which is what the bisection caught in my own
+expected value.
+
+**THE DECISION: A TRAP, NOT A CLEARED TAG.** A hybrid ISA where one instruction loads both data and
+capabilities has to clear the tag instead of faulting, or an ordinary `memcpy` over mixed memory would
+fault constantly. **This machine has no such case**: `OCL.D`/`OCS.D` and `OCL.C`/`OCS.C` are separate
+instructions and the data path already invalidates tags byte-granularly, so a data copier cannot move
+a capability at all and never needs the permission. Veda-Core's own cause table has called 0x14 and
+0x15 *Violations* since the permission set was adopted, and silence would be the failure mode R30 and
+R32 closed elsewhere -- a refusal software cannot observe is one it will not honour.
+
+**ORDERING: THE COARSER PERMISSION FIRST.** Reading the bytes at all is the prerequisite; reading them
+as AUTHORITY is the additional right, so 0x12 outranks 0x14 and 0x13 outranks 0x15. Both sit above
+alignment, bounds, residency and copy-on-write, because a refusal outranks a repair request. Three RTL
+tests confirmed the ordering empirically before their objects were updated -- a misaligned `OCL.C`
+reported 0x14 rather than 0x08, an out-of-bounds `OCS.C` reported 0x15 rather than 0x01, and a
+copy-on-write `OCS.C` reported 0x15 rather than 0x0C. Each is the permission refusal correctly winning.
+
+**`need_cap` IS AN EXPLICIT PARAMETER, NOT DERIVED FROM `check_align`,** even though the two coincide
+today: `OCL.C`/`OCS.C` are the only capability-width accesses and the only align-checked ones. Tying
+"this access is 32-byte aligned" to "this access moves authority" is the kind of unstated coupling
+this record keeps finding, and a future unaligned capability access would silently take the wrong
+permission with it.
+
+**BLAST RADIUS: TWELVE TESTS, AND EVERY ONE OF THEM WAS RELYING ON THE GAP.** Five Sail tests, seven
+RTL tests. They divide cleanly: tests that pin the scratch fixture's `Perms` value, and tests that
+spill a capability into an object which now has to grant permission for it. The seeded scratch object
+and the `c11` residency fixture gained bits 4 and 5 on both layers; four self-populated containers
+gained them in their own descriptors. The spill-slot test already carried a note that a slot must be
+at least 32 bytes -- "a real ABI consequence of the format change, not a test fudge" -- and the same
+sentence now covers permission as well as size.
+
+**WHAT IS DELIBERATELY NOT BUILT, AND WHY IT IS NOT A QUICK FIX.** `0x10` GLOBAL and `0x16`
+PERMIT_STORE_LOCAL_CAPABILITY both require a **local/global capability distinction this architecture
+does not have.** GLOBAL marks a capability that may be stored into globally-reachable memory;
+STORE_LOCAL_CAPABILITY is the authority to store one that lacks it. The pair exists to stop a
+short-lived reference -- a stack capability being the canonical case -- from outliving its frame by
+being written somewhere durable. That is a real temporal-safety mechanism and it deserves its own
+increment with its own design, not a bit bolted onto the dereference chain. `VEDA_CORE_SPEC.md`'s
+cause table now reads **"Allocated, NOT enforced"** for both, because a specification that overstates
+what a machine enforces is the same defect class as a machine that fails open.
 
 Every `permBit` call in the Sail model enforces exactly eight permissions: EXECUTE, LOAD, STORE,
 ACCESS_SYSTEM_REGISTERS, SEAL, UNSEAL, INVOKE, NMC_COMPUTE. Every permission bit the RTL ever indexes
