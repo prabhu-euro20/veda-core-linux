@@ -5490,6 +5490,75 @@ switcher's legitimate OCRETURN exit must still abandon its frame, and the schedu
 if it did not. The RTL half was shown to fail with the counter ungated at all five sites, and the
 strip was asserted to have landed before the run was believed.
 
+### R68. R65's rule reached two sites out of seven, and I shipped it that way
+
+**Status: MEASURED, FIXED AND COVERED ON BOTH LAYERS. Found by a 33-agent sweep of two classes this
+register names but had never swept systematically -- justifications that expired, and tests that pin
+a weakness as the contract. This is my own incomplete fix, one increment old.
+Sail 119/119, RTL 108/108, ACT4 51/51, differential 25/25.**
+
+#### The gap
+
+`veda_oda_denies(old_entry.Base, old_entry.Length)` is an **authority test at seven sites**. R65
+established that for a non-resident object that test asks about the frame the object has **left**, and
+installed `veda_stale_authority` at **two** of them -- `set.cow` and `set.domain`. Populate, Destroy,
+Populate-Fast, page-out and page-in kept the unguarded form.
+
+**This is R58's shape a second time**: a fix that landed in too few places while the suite stayed
+green. R58 was three clauses and I hit the wrong two; here it was seven sites and I closed two.
+
+#### Measured, by instruction trace, before the fix
+
+From User, holding an ODA covering **only the frame the victim had left**:
+
+```
+[53] [U] veda.odt.populate on the PAGED-OUT victim   ->  ACCEPTED, retired normally
+[56] [U] the same instruction, out-of-window object  ->  REFUSED            (control)
+```
+
+After the fix the same binary shows `[53] [U] populate -> [54] [M] trap_handler+0`.
+
+**The harm is worse in kind than R65's.** R65 rewrites a victim's **policy**; this retargets the
+victim's **identity** into attacker memory with attacker `Perms` -- and because `page.in` refuses a
+resident entry, the victim's evicted contents can then **never be restored**.
+
+#### Populate-Fast is not exempt, and the sentence that would have exempted it had expired
+
+The natural objection is that Populate-Fast is the residency-**repair** path, which by definition runs
+on a `{valid, not resident}` entry, so gating it trades a hole for a lockout. The sweep's own agent
+raised exactly that, citing DESIGN_02's mechanism-1 sketch: *"the handler fetches contents from
+`backing`, allocates physical Base (ODT-Populate-Fast), sets `resident`, and resumes."*
+
+**That sentence is superseded by its own document.** DESIGN_02's cached-Base decision says outright:
+*"Page-in therefore **cannot be plain ODT-Populate** ... A distinct, generation-preserving page-in
+path is required, gated on `valid & not resident`."* The repair path is `veda.odt.page.in`. So
+Populate-Fast carries the term with the other two.
+
+**The objection was itself an instance of the class the sweep was hunting** -- a justification that
+was true when written and false when relied on. It surfaced inside the pass that was looking for
+exactly that, which is the best evidence the sweep was worth running.
+
+#### Scope, and what is deliberately left
+
+Three of the five unguarded sites are closed: **Populate, Populate-Fast, Destroy**. **`page.in` and
+`page.out` are left**, because for them the question is genuinely open and is being decided in its
+own pass: *what should authorize a write to a non-resident entry, given that the stale-Base window
+test is meaningless there?* Candidates under adversarial review are `owner_domain`, the destination
+window alone, a distinct pager capability, and Machine-only. Recorded as **NOT CLOSED**.
+
+**Standing, stated plainly:** the delta requires the window over the freed frame to be acquired
+**after** the eviction. While the victim was resident under that window the attacker already held
+descriptor authority -- that is R47's design. This is the same standing R65 and R66 were accepted
+under, and it is stated rather than inherited.
+
+#### Coverage
+
+`sail_tests/vc_r68_populate_stale_base_neg.S` and `rtl/sim/veda_smoke_r68_populate_stale.S` +
+testbench, both carrying the control that decides what the finding is -- **the same actor, the same
+instruction, an object whose old Base is outside the window, still refused** -- so a fix that simply
+broke Populate for delegated actors cannot pass. Zero corpus damage: no existing test relied on
+minting over a paged-out object.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
