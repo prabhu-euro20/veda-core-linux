@@ -5971,9 +5971,19 @@ cannot escape -- and against **CAndPerm**. **It never considered TRANSFER.**
    **`0x0C` is not a refusal.** R38's own text calls it a **repair request**: it instructs a handler to
    allocate, copy, and hand back a fresh writable object. Forcing it is an **allocation on someone
    else's behalf**, repeatable.
-2. `veda_ocl_insts.sail:1321` -- `set.cow` does **not** bump the generation, and the comment says why:
-   *"that is the entire purpose of this."* So a capability minted **before** the object became
-   copy-on-write stays live, and keeps `PERM_STORE`.
+2. **`veda_ocl_insts.sail:1238-1241`** -- `set.cow` does **not** bump the generation, and its comment
+   names the reason: *"NOT bumped. **fork()** marks the parent's objects copy-on-write while both
+   parent and child hold live capabilities to them; bumping here would kill exactly those, at exactly
+   the moment they are needed."* So a capability minted **before** the object became copy-on-write
+   stays live, and keeps `PERM_STORE`.
+
+   > **CITATION CORRECTED.** This entry first cited `:1321` with the quote *"that is the entire
+   > purpose of this."* **That line is in `VEDA_ODT_SET_DOMAIN`, not `VEDA_ODT_SET_COW`** -- its own
+   > text says *"EVERYTHING except **owner_domain** is copied verbatim"*. Both clauses do decline to
+   > bump, so the CLAIM was true and the POINTER was wrong, which is the more dangerous of the two
+   > because the next reader follows the pointer. Caught by an independent census re-reading the
+   > source instead of trusting the brief it was given, and the corrected quote is the better one --
+   > it names **fork** as the reason, which is what refutes the bump-the-generation design directly.
 3. `VEDA_OCS_C` and `VEDA_OCL_C` move that capability through memory, and `veda_check_access` has
    **eleven arms and zero domain terms**.
 
@@ -6036,6 +6046,83 @@ capability?"*. What it cannot answer is *"whose is it?"*.
 TRANSFERABLE?** That is a property of the capability, not of any domain -- which is why a mechanism
 for Form 2 must not need a principal notion, and why CHERI's local/global pair is the shape worth
 pricing first.
+
+#### FORM 3 -- the memory channel carries the machine's DOMAIN IDENTITY too, measured
+
+`OCS.C` reads `let store_cap = C(rd); let store_tag = CTag(rd)` and packs both **verbatim**
+(`veda_ocl_insts.sail:370-380`). It seal-checks the **container** and **never the source**. So a
+**sentry** -- `otype = VEDA_OTYPE_SENTRY`, the token `OCRETURN` accepts -- goes into memory and comes
+back out intact, tag and otype. `poc_r72f3_sentry_through_memory.S` and its delegated variant:
+
+```
+victim BOOT-owned (never delegated)   sentry survives, cgettag 1;  ocreturn SUCCEEDS;  then bind -> 0
+victim delegated to region 0          sentry survives, cgettag 1;  ocreturn SUCCEEDS;  then bind -> 1
+```
+
+**Both rows matter.** The first says R75/R76 increment 1 holds against this: not because the sentry
+cannot travel -- it does, and the `ocreturn` genuinely installs `veda_pcc_object` -- but because **a
+BOOT-owned object is public to no identity at all**. Increment 1 removed the *payoff*, not the forge.
+
+**The second row is the finding.** The moment boot delegates an object to a domain -- the ordinary
+case, and what increment 1's own design tells software to do -- **any sentry for that domain that
+reaches shared memory hands over everything delegated to it.** B bound nothing by name.
+
+**This corrects the census that raised it**, which called Form 3 *"R75's forge with the bind-by-name
+step deleted."* Half right: the forge step works, the payoff does not, and which half you get depends
+on whether the target was delegated. Measured rather than accepted.
+
+#### The general statement, which covers all three forms
+
+> **The memory channel has no addressee.** Publishing into a shared object publishes to **everyone who
+> can read it**, and there is no way to name a recipient.
+
+Form 1 moves **data authority**, Form 2 moves an **entitlement**, Form 3 moves **identity**. One defect,
+three payloads.
+
+#### The mechanism pass: a shape adopted, a specification refuted, and R78 re-scoped
+
+Four designs, two judges and an adversarial refuter. Two designs **refuted themselves**, which is the
+outcome this process exists to produce: the generation-bump author wrote *"AND YES: FORK STOPS
+WORKING. I say so plainly, which by the brief's own test refutes the design"*, and the entry-resident
+author found the rule *"cannot be written over state that exists"* -- 16 spare bits at `+30/+31`
+cannot hold a principal, and a "who" needs the sound domain notion Form 2 exists without.
+
+Both judges advanced **the non-travelling permission**: a new `Perms` bit 13 minted by Bind as
+`masked[3]` -- **R38's own `0xFFF7` output** -- a carry bit 14 on the container, and a strip on the
+`OCL.C` load path. `veda_types.sail:256` reads *"bits 13-15 spare"*, verified.
+
+**What survived the refuter, and it is the best idea in the four reports.** Anchoring the new right on
+`masked[3]` means that on a copy-on-write entry the bit is **zero by construction**, so **no Bind by
+any principal at any privilege can mint the split right** -- *including R77's ambient Machine
+handler*, which `veda_bind_domain_ok`'s second arm otherwise passes everything. The refuter set out to
+break that and could not, four ways: re-Bind, `CAndPerm` (an AND-only mask, `veda_core.tlv:3523`),
+byte-copy laundering (the granule tag dies), and the ambient handler. And the headline chain closes
+with the granularity nobody else reached: `mtval` moves `0xEC` to `0xF3`, so the transferred
+capability **stays tagged and stays usable for writing** -- it simply stops being an entitlement.
+
+**And the refutation, which is R78 re-scoped and sharpened.** Under the design as written, **the split
+entitlement becomes the only right in the machine that cannot survive a context switch or a compiler
+spill.** Verified at source rather than inherited:
+
+- `TOOLCHAIN_MILESTONE_13_CRF_EXHAUSTION_DECISION.md:37`: *"treat the table-base capability exactly as
+  CHERIoT treats every live capability register at a context switch -- **nothing is permanently exempt
+  from the switcher's own save/restore cycle**."* That is a decision this project already took.
+- The shipped switcher does exactly that: `runtime/veda_sched_asm.S` spills with `OCS.C` at `:166`,
+  `:168`, `:246`, `:256` and restores with `OCL.C` at `:294`, `:305`, **every switch**.
+- Its save areas are populated `li t1, 0x0030000C` at `:98` and `:108` -- **Perms `0x000C`, and no
+  carry bit**.
+
+**R78 must therefore be re-scoped**: I recorded it as blocking *any rule restricting what `OCS.C` may
+store*. The measured blocker is the other side -- **any rule conditioning what `OCL.C` may load**,
+because the strip happens on restore. The class is unchanged and the direction was wrong.
+
+**DECIDED: adopt the shape, refuse the specification, and price the carry bit as a deployment
+obligation.** The mint stays exactly as designed. What is not settled is the carry half: giving the
+switcher's save areas bit 14 makes them work -- and is precisely CHERI's model, where the **stack**
+bears `PERM_STORE_LOCAL_CAPABILITY` -- but it also makes every save area a place where the
+entitlement survives, and a save area the switcher can read. **That trade is CHERI's known one and it
+has not been priced here**, so it is not being chosen here. What lands first is R78's real question:
+**which containers may carry, and who populates them.**
 
 #### The sentence R38(b) already wrote, about the wrong fragility
 
@@ -6875,6 +6962,12 @@ Measured here: capability spill in the corpus
 (`sail_tests/vc_ocsc_bind_spill_restore_roundtrip.S:65`) goes through an **ordinary capability**, not
 the SSC -- `ocs.c c6, x5, c0`. So today **spill and hand-off are the same instruction through the same
 kind of container, and the hardware cannot tell them apart.**
+
+> **RE-SCOPED BY MEASUREMENT.** The sentence below says *"restricts what `OCS.C` may store"*. The
+> mechanism pass measured the blocker on the **other side**: the winning design strips on the
+> **`OCL.C` load** path, and what breaks is **restore**, not spill. The class -- a rule that cannot
+> tell a spill from a hand-off -- is unchanged; the direction was wrong, and the corrected form is
+> *any rule conditioning what `OCL.C` may load*.
 
 **Consequence for the mechanism choice**: any Form 2 rule that restricts what `OCS.C` may store will
 hit compiler spill unless there is a distinguished container -- and the distinguished container this
