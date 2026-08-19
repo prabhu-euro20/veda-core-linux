@@ -6002,6 +6002,41 @@ the object became copy-on-write, forces the split.
 region-keyed rule is inert there). Form 2 bites in the configuration the machine ships in, and a
 mechanism for it that needs a sound domain notion is therefore **the wrong shape**.
 
+#### Does it generalise? A repair-request census, done independently, that NARROWS the finding
+
+The obvious next question is whether every fault that asks software to *do* something is forceable the
+same way. Three causes are repair requests rather than refusals, and the answer is **no, only one of
+them is**:
+
+| cause | what it asks software to do | forceable by a transferred capability? |
+|---|---|---|
+| `0x09` REGION_FAULT | page the domain's ODT table in | **No.** It is raised **zero** times in the dereference file -- verified with a control -- and comes only from `veda.bind` and the two crossings, each of which demands authority the transfer does not supply. |
+| `0x0A` RESIDENCY_FAULT | page the object in | **No, and the model says why.** Its own comment: *"RESIDENCY_FAULT is raised only for an access that would otherwise have SUCCEEDED."* The requester was **entitled to the access**, so paging in **fulfils** a legitimate request rather than granting a new resource. |
+| `0x0C` COW_FAULT | **allocate a fresh object and copy into it** | **Yes.** It is the only one that creates a NEW resource for the requester, and the only one whose entitlement R38 declared to be *different from* the permission it rides on. |
+
+**So the finding is narrow and specific, and it should be described that way.** A suspicion that
+`veda_regs.sail:987` claimed a memory load could raise a region fault was also checked and **refuted**
+-- in context "a load" there means a **CRBR** load at a crossing, and the comment is correct.
+
+#### The reduction this leaves, which is what the mechanism has to answer
+
+**The copy-on-write split is the machine's only right with a TEMPORAL qualifier.** R38's rule is
+"whoever held write authority **at the moment** the object became copy-on-write". A capability has no
+field recording when it was minted relative to `set.cow`. The machine's temporal field is
+`generation`, and `set.cow` **deliberately does not bump it** -- which is exactly why the qualifier is
+unrepresentable in a capability, and therefore why the right cannot be re-checked once the capability
+leaves its original holder.
+
+**And the machine already knows half of it.** Because `veda_bind_perms` masks a cow entry's `Perms`
+with `0xFFF7`, **a capability carrying `PERM_STORE` to a cow object is pre-cow BY CONSTRUCTION** -- no
+bind after `set.cow` can produce one. So the hardware can already answer *"is this a pre-cow
+capability?"*. What it cannot answer is *"whose is it?"*.
+
+**The question therefore reduces to one sentence: should a pre-cow store capability be
+TRANSFERABLE?** That is a property of the capability, not of any domain -- which is why a mechanism
+for Form 2 must not need a principal notion, and why CHERI's local/global pair is the shape worth
+pricing first.
+
 #### The sentence R38(b) already wrote, about the wrong fragility
 
 `veda_ocl_insts.sail:1399-1401` records: *"The entitlement should survive paging, which means it must
