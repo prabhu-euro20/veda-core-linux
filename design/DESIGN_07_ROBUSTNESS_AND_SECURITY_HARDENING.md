@@ -8071,6 +8071,43 @@ would have to change."* That is still a cost -- it is the reference implementati
 deployment would use -- but it is not evidence that a mechanism is reachable, and this register has been
 treating it as though it were.
 
+#### AND THE FILE IS ALREADY BROKEN, TWICE, IN WAYS NOTHING COULD HAVE NOTICED
+
+An adversarial pass measured what the unbuilt file would actually do if it ran. **Both breakages were
+verified by me at source before recording.**
+
+**BREAKAGE 1 -- R71 broke the shipped switcher and the two test mirrors were fixed instead.**
+R71 made a compartment crossing clear the capability register file unless CSR `0x8CA` names what
+survives, and made trap entry **zero the mask unconditionally**. So a handler that holds a capability
+across its own `OCInvoke` must re-arm the mask *after* the trap, every time.
+
+```
+grep -rn '8CA' runtime/                                    -> NOTHING
+grep -c 'csrw 0x8CA' sail_tests/vc_scheduler_cooperative_yield.S -> 4
+grep -c 'csrw 0x8CA' rtl/sim/veda_smoke_m23_scheduler.S          -> 5
+```
+
+**The two files that are RUN were updated. The one that SHIPS was not.** The switcher holds `c8`
+(object 167, its own state) permanently and performs crossings at `:217`, `:268` and `:332` with no mask
+write anywhere -- so `c8` is cleared out from under it at the first one. An independent probe confirmed
+the mechanism end to end, with an anti-vacuity row (trap entry does **not** clear the file, so the loss
+is the crossing's) and an anti-regression row (a mask naming `c8` preserves it).
+
+> **"Zero corpus cost can be the tell" -- IN REVERSE.** R71 landed at zero cost to the shipped switcher,
+> and that zero was not evidence the mechanism was harmless. It was evidence the file was **unreachable**.
+
+**BREAKAGE 2 -- a stale sentinel the widening left behind.** `veda_sched_asm.S:125-131` builds the
+return-sentry source with `li t1, 0xFFFF0002`, commented *"Length=0xFFFF(unbounded)"*. That comment was
+true when `Length` was 16 bits. **Phase 1 increment 3 widened it to 40**, and `VEDA_PCC_UNBOUNDED` is
+`0xFFFFFFFFFF` (`veda_regs.sail:120`, RTL twin `veda_core.tlv:1150`). So `0xFFFF` is no longer the
+sentinel -- it is a genuine **65535-byte compartment**, and the ordinary loads that follow are inside it
+rather than outside. The tests absorbed the widening; the runtime did not.
+
+**Two independent breakages, neither caused by malice or haste, both invisible for the same reason.**
+That is what an ungated file costs, and it is a stronger argument than R87's original one: the risk is
+not that the file *might* drift, it is that it *has*, twice, and the register kept citing it as evidence
+throughout.
+
 #### DECIDED: R83's step 2 does not start by converting that file
 
 Converting 13 ordinary accesses in a file no suite compiles would produce **exactly the zero corpus cost
