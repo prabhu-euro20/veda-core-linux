@@ -8108,6 +8108,33 @@ That is what an ungated file costs, and it is a stronger argument than R87's ori
 not that the file *might* drift, it is that it *has*, twice, and the register kept citing it as evidence
 throughout.
 
+#### RUN FOR THE FIRST TIME -- AND IT DOES NOT WORK. FOUR STALE ASSUMPTIONS, NOT TWO
+
+**The `llvm-mc` dependency was unnecessary.** Every Veda instruction in the file is a `.insn`, so the
+**GNU assembler the other four suites already use** handles it with **no errors and no undefined
+symbols**: it exports exactly `veda_sched_init_asm` and `veda_sched_run_asm` and requires nothing. So a
+pure-assembly driver can gate it, and `sail_tests/poc_r87_shipped_switcher_gated.S` is that driver --
+it `.include`s the real runtime file and drives a four-yield round robin.
+
+**It trap-loops at `MEPC=0x80000214`.** Disassembled: `0253458b` = **`ocs.c c6, x5(=32), c11`**, the
+first spill of the globals table-base capability into save area 0. **Two independent reasons, and either
+alone is fatal:**
+
+| # | the stale assumption | what changed under it |
+|---|---|---|
+| **1** | `save_area_0`'s object is `li t1, 0x0030000C` -- **Length 48 bytes** -- and its own layout comment reserves **16 bytes** for the capability (*"offset 32-39 ... low 8B"*, *"offset 40-47 ... high 8B"*) | **A Veda capability is 256 bits.** `veda_types.sail:102-107` records the *"256-bit respec"*, and `OCS.C` writes **32 bytes** (`veda_ocl_insts.sail:446`). Offset 32 + 32 = **64** against a 48-byte object: BOUNDS_VIOLATION. The layout is a **128-bit** capability layout |
+| **2** | those Perms are `0x000C` = LOAD\|STORE | **R40** made `PERM_LOAD_CAPABILITY` (bit 4) and `PERM_STORE_CAPABILITY` (bit 5) enforced. Neither is set, so the same instruction fails the permission check too |
+| **3** | `grep -rn 8CA runtime/` returns **nothing** | **R71** made a crossing clear the capability file unless CSR `0x8CA` names survivors, and trap entry zeroes the mask. The switcher crosses at `:217`, `:268`, `:332` holding `c8`. Both test mirrors write the mask (**4** and **5** times); the shipped file never does |
+| **4** | `li t1, 0xFFFF0002`, commented *"Length=0xFFFF(unbounded)"* | `VEDA_PCC_UNBOUNDED` is `0xFFFFFFFFFF` since Length widened 16 -> 40. Worse, **plain Populate cannot express it at all**: its descriptor is Base 32 / Length **16** / Perms 16, and `veda_ocl_insts.sail:926-928` says so deliberately -- *"the limit is in the ENCODING, visibly, not a silent truncation"*. That site must become `populate.fast` |
+
+**Four independent stale assumptions, from four different widenings, in one file.** Each was absorbed by
+the two test mirrors and by nothing else. None is a mistake anyone made; each is a change the file was
+never asked to survive.
+
+> **This is what an ungated file costs, stated as a measurement rather than a worry.** The register did
+> not merely risk citing stale code -- **it cited code that does not run at all**, in five separate cost
+> arguments, for months.
+
 #### DECIDED: R83's step 2 does not start by converting that file
 
 Converting 13 ordinary accesses in a file no suite compiles would produce **exactly the zero corpus cost
