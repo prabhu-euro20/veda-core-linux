@@ -295,7 +295,7 @@ Two findings rejected on verification (recorded so they are not re-raised): ODT-
 already isolated from base-ISA stores by construction; TCM static placement already covers the
 same-hart cross-compartment case (no flush needed).
 
-## Hardening found by BUILDING it -- R10..R71, and why this section exists
+## Hardening found by BUILDING it -- R10..R74, and why this section exists
 
 **The section above records the 2026-08-11 red-team pass, which reasoned over DESIGN_00-06 and
 produced R1..R9 plus Rev-A..Rev-F. It is intact and still correct. It is also only a third of the
@@ -307,7 +307,7 @@ which is the argument for keeping the Sail model and the RTL as two independentl
 a differential harness between them.
 
 **All seventy live in `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which now runs
-R1..R71 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
+R1..R74 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
 R18, R25, R27, R28 -- and **three of them were shipped, verified hardware fixes**, two of exploitable
 class, invisible because they had landed under a parallel `RTL-n` numbering or been co-committed under
 another finding's heading. They are entered now.
@@ -355,7 +355,7 @@ gate -- "Sail residency/COW corpus (positive + negative + mutation), then RTL mi
 increment 1, R71). R50 had measured that the capability register file crosses a compartment boundary
 **intact**: OCInvoke's only capability write is the IDC, OCReturn writes none, so a callee needed no
 authority at all -- it used a register the caller left bound. The crossing now **clears the
-capability register file by default**, governed by **CSR `0x7CA` `veda_xretain`**: bit `i` set means
+capability register file by default**, governed by **CSR `0x8CA` `veda_xretain`**: bit `i` set means
 capability register `i` survives, and a CSR that was never written is zero, so **silence means clear
 and can never leak**. The mask is **self-consuming**, so delegation costs two instructions and costs
 them *inside the compartment that is delegating* -- which is where the decision belongs.
@@ -374,9 +374,45 @@ asks **no domain question**. A capability a callee legitimately receives in the 
 usable by anyone who later obtains that register by any means -- possession and authority are still
 the same thing on the dereference path, and that is now the largest single open item on the crossing.
 
+**Two defects in that same increment were found the same day, by refuting it rather than by a suite.**
+
+**R74** -- the retain mask was at CSR `0x7CA`, and privilege on this machine is derived from the CSR
+**address** (`csrPriv(csr) = csr[9..8]`). `0x7CA` is Machine-only. So the paragraph above, which
+tells compartments to arm the mask themselves, named an instruction a compartment could not execute.
+Measured rather than deduced: one shipped test writes the mask after dropping to User, and its own
+trap counter read 2 instead of 1 -- the write trapped, the mask stayed zero, and the suite passed
+110/110 without anyone noticing. Nothing leaked (a zero mask clears everything, which is the
+fail-safe direction), but with the register channel shut to unprivileged code and the memory channel
+open, **R71 had routed every User-mode delegation onto the one path with no governance.** The mask
+now lives at **`0x8CA`** -- from the official RISC-V Privileged specification's CSR allocation table,
+the only Custom read/write **User** range, with the specification's own guarantee that custom
+addresses are never redefined by future standard extensions. No privilege-check logic changed on
+either layer; only the address constant. The invariant that makes this safe -- **a set bit means "do
+not clear", never "materialize"** -- is now a test rather than a sentence: an EMPTY capability
+register is deliberately retained across a crossing and must come out still empty and still unusable.
+
+**R73** -- the per-object bind gate trapped for all three bind modes, and nothing anywhere said why.
+It had been written beside the residency gate and inherited residency's all-modes policy without
+inheriting residency's argument, which does not transfer: region and residency trap for every mode
+so the holder goes and **services** something ("paged out, retry"), and there is nothing to service
+on a domain refusal. Milestone 12 had set the rule for ownership refusals -- plain Bind hard-traps,
+Bind-NoTrap soft-fails -- and the sibling `owner_hart` arm still implements it. Not an escape and not
+a cross-layer divergence: both layers trapped identically, and a soft-fail grants nothing either.
+It matters because **R43 justified a design decision by citing a sentence this gate made false.**
+
+**And the biggest thing found today is still open: R72.** The machine refuses an object by NAME and
+hands over the same object through MEMORY. Measured on both layers with identical values: a
+compartment forbidden to bind an object (cause `0x0B` DOMAIN) obtained the very same object by
+loading the capability out of a shared object -- one trap in the whole run, and it was the refusal;
+**the transfer itself took zero.** `veda.bind` and `ocl.c` are both capability-acquisition
+instructions and only one asks the ODT's ownership question. The mechanism is being **priced before
+it is chosen**, because the container's descriptor is already looked up on that path and the
+referent's is not, and a second table lookup in one instruction is exactly the class of cost that
+refuted an earlier design.
+
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
-cross-layer differential suite. As of 2026-08-19: **121/121, 110/110, 51/51, 25/25**, and it now ends
+cross-layer differential suite. As of 2026-08-19: **123/123, 112/112, 51/51, 25/25**, and it now ends
 with an explicit verdict line.
 
 **Read that command's history before trusting any earlier number.** Until R46 it **could not fail**:

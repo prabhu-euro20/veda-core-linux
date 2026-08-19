@@ -2130,10 +2130,12 @@ it now refuses it.
 
 > **Kept as written, corrected here (2026-08-19).** The enumeration above is the list **as it stood
 > when R32 shipped**. Two CSRs have been allocated since -- **0x7C9 `veda_mfaultobj`** (R64, read-only)
-> and **0x7CA `veda_xretain`** (R71, read-write) -- and both were added to `$csr_addr_known` with the
+> and **0x8CA `veda_xretain`** (R71, read-write) -- and both were added to `$csr_addr_known` with the
 > fix that introduced them, `0x7C9` also to `$csr_is_readonly`. Extracted from `veda_core.tlv` rather
 > than recalled, the decode list is now **seventeen** addresses: `0x300`, `0x305`, `0x340`-`0x343`,
-> `0x7C0`-`0x7CA`. The mechanism R32 shipped is unchanged; only its inventory moved.
+> `0x7C0`-`0x7C9`, and **`0x8CA`** -- the retain mask, moved out of the Machine custom range
+> entirely by R74 so unprivileged compartments can reach it. The mechanism R32 shipped is
+> unchanged; only its inventory moved.
 
 Verified by `p7_csr_space` flipping to AGREE, and by a mutant that forces `$veda_csr_undef` to zero
 and is killed.
@@ -5765,7 +5767,7 @@ available does not make it economically readable**, and only the implementation 
 > Sail layer is structurally incapable of showing. It is an argument for the two-layer discipline
 > itself, not an argument against Sail-first.
 
-#### The ABI that landed: CSR 0x7CA `veda_xretain`
+#### The ABI that landed: CSR 0x8CA `veda_xretain`
 
 - **Retain, not clear.** Bit `i` set means capability register `i` **survives** the next crossing.
   Never written means zero means retain **nothing** -- so **silence means clear, and silence can
@@ -5790,6 +5792,12 @@ It costs a **PCC window**. `vc_r58_domain_writers.S` broke, and the reason is th
 as designed: a compartment that wants to pass capabilities onward must set the CSR **itself, from
 inside its own PCC window**, because the caller's mask was already spent getting it there. Its
 compartment window had to widen from `0x40` to `0x80` to hold two more instructions.
+
+> **AND THAT SENTENCE NAMED AN INSTRUCTION THE COMPARTMENT COULD NOT EXECUTE.** At `0x7CA` the mask
+> was Machine-only by its address, so the software this paragraph addresses would have trapped on it.
+> Found the same day, measured, and closed as **R74** -- the register now lives at `0x8CA`, in the
+> only Custom read/write **User** range the RISC-V Privileged specification allocates. The paragraph
+> above is true as written only from R74 onward.
 
 That is the honest price. **Delegation is no longer free and no longer silent** -- it costs two
 instructions and it costs them *inside the compartment that is delegating*, which is exactly where
@@ -5861,6 +5869,313 @@ domain question -- `veda_pcc_object` and `veda_current_region` remain **zero** o
 access-check file. A capability a callee legitimately receives in the retain mask is still usable by
 anyone who later obtains that register by any means. **Possession and authority remain the same thing
 on the dereference path**, and that is now the largest single open item on the crossing.
+
+### R72. The machine refuses an object by NAME and hands over the same object through MEMORY
+
+**Status: MEASURED ON BOTH LAYERS BY THE LEAD, INDEPENDENTLY CONFIRMED BY A SEPARATE CHANNEL CENSUS.
+OPEN -- the mechanism is being designed and this entry exists so the register has no gap and the
+measurement is not carried in a task list. Sail 123/123 and RTL 112/112 are green WITH THE HOLE
+PRESENT, which is the point: no suite in the corpus asks this question.**
+
+#### The experiment, and why it is built the way it is
+
+R71 closed the register channel at the crossing. This asks whether that closed the leak or moved it.
+
+The decisive move is the **control**: object 200 is locked to domain 0 with `veda.odt.set.domain`, so
+compartment B -- executing from a **region 1** code object -- may not bind it by name at all. Without
+that lock the finding would be vacuous, because `owner_domain` defaults to `VEDA_DOMAIN_ANY` and B
+could simply re-Bind the name (R52). **The hole only exists in the configuration where the policy was
+actually applied, so the experiment applies it.**
+
+```
+veda.odt.set.domain 200 -> 0        # the caller narrows its own object
+veda.bind  c1, 200 ; ocs.d c1 <- 0xC0FFEE
+veda.bind  c2, 201 ; ocs.c  mem=c2, src=c1     # PUBLISH the capability
+csrw 0x8CA, 0x2000 ; ocinvoke                  # retain ONLY the sentry: R71 clears c1 and c2
+--- inside compartment B, region 1 ---
+veda.bind.notrap c5, 200  ->  REFUSED   mtval 0xAB = cap_idx 5, cause 0x0B DOMAIN
+veda.bind  c6, 201        ->  allowed   (201 is open)
+ocl.c c7, c6              ->  allowed
+cgettag c7                ->  1        A TAGGED, VALID CAPABILITY
+ocl.d  c7                 ->  0xC0FFEE THE SECRET
+```
+
+**One trap in the entire run, and it is the control's refusal. The attack itself takes zero.**
+The RTL reproduces every value identically.
+
+#### What it actually says
+
+**`veda.bind` and `ocl.c` are both capability-ACQUISITION instructions, and only one of them asks
+the ODT's ownership question.** The hardware refused B the object by NAME with a named cause, then
+handed B the same object through MEMORY without asking anything. The policy the machine accepts at
+`set.domain` is not the policy the machine enforces.
+
+Confirmed structurally by a separate census: `VEDA_OCS_C` is the **only** instruction in the model
+that writes a tagged capability to memory, `VEDA_OCL_C` the **only** one that reads one back, and
+both are authorised solely by `veda_check_access`, **whose eleven arms contain zero domain terms**.
+
+#### The strongest argument against it, conceded where it is right
+
+*Both parties already held capabilities to the shared object, so what leaks is authority to a THIRD
+object -- and that is what a capability system is for.*
+
+**It narrows the finding and does not defeat it.** Where it is right: at the default
+`VEDA_DOMAIN_ANY` the memory channel adds nothing, because B reads the name with `CGetObjectID` and
+Binds it. **Where it fails:** the moment software uses the policy field the architecture provides,
+the machine enforces it on the mint path and not on the transfer path. A policy that a single
+`ocs.c` erases is not defence in depth; it is a suggestion. And the leak does not require a
+malicious A -- A publishing a capability intended for a trusted peer C leaks it to every domain that
+can read the same object.
+
+#### Adjacent channels the census turned up, recorded so they are not lost
+
+- **The trap frame and `mret`.** `veda_crossing_clear` has exactly two call sites, OCInvoke and
+  OCReturn. **Neither trap entry nor `xret` touches the capability register file**, so every
+  capability survives a trap in both directions. R50 increment 1 already named the trap path "a
+  fourth compartment entry no crossing rule can reach"; R71 did not reach it either.
+- **Sentries through the memory channel.** `CSealEntry` requires no authorising capability and no
+  privilege, so a sentry placed in a shared object is a call gate for whoever can read it.
+- **The TSC** crosses both crossings intact in tag and value, deliberately -- Machine-only today.
+- **The dereference path consults none of the three region predicates**, though `veda.bind` uses
+  `veda_region_is_resident` and both crossings use `veda_region_rt_resident`.
+
+#### What is NOT yet decided
+
+Whether the governor is CHERI's Global / StoreLocalCapability pair (the two bits **R42** records as
+allocated and enforced by neither layer), an ODT containment rule that uses the table CHERI does not
+have, a domain stamp in the capability's own `flags`, or none of them. The hardware cost is the
+gate: the container's ODT entry is already looked up by `veda_check_access`, but the **referent's**
+is not, and a second ODT lookup in the same instruction is exactly the class of cost that refuted
+R50 increment 2's ABI. **That cost is being priced before the mechanism is chosen, not after.**
+
+### R73. A domain refusal trapped for all three bind modes, and nothing anywhere said why
+
+**Status: MEASURED ON BOTH LAYERS BEFORE CHANGING ANYTHING, FIXED AND VERIFIED. Sail 122/122,
+RTL 111/111, ACT4 51/51, differential 25/25. NOT a capability escape and NOT a cross-layer
+divergence -- a contract defect, and the severity is stated rather than inflated. Found while
+refuting a suspicion raised by a trace taken for an unrelated finding.**
+
+#### What was measured, before any edit
+
+A `veda.bind.notrap` issued from a region-1 compartment against an object narrowed to domain 0
+**trapped**, with `mtval = 0xAB` -- `cap_idx = 5`, cause `0x0B` DOMAIN_VIOLATION -- and left the
+destination register untouched. The RTL agreed **exactly**. So both layers implement the same rule,
+and the defect is that the rule is not the one written down.
+
+#### The rule that is written down, in three places, and contradicted in the code
+
+`rtl/MILESTONE_12_RESULTS.md` states it outright for ownership refusals:
+
+> *"**Bind-NoTrap and Rebind both always soft-fail** (Tag cleared, no trap) -- Rebind joins 'sealed
+> rd' and 'ODT miss' as a third soft-fail reason, **never a fourth hard-trap reason**, matching its
+> own established 'never traps for any reason' rule from Milestone 8."*
+
+`veda_bind_insts.sail` still says it verbatim above the Rebind arm -- *"Rebind never traps for ANY
+failure reason, **owner mismatch included**"* -- and the `owner_hart` arm forty lines below **still
+implements it**, with its own comment: *"Bind-NoTrap still soft-fails here too, matching its own
+established convention for every other failure reason."*
+
+The `owner_domain` gate added later by R13/R52 was the one exception, and it was silent.
+
+#### How it got there -- a policy inherited without its argument
+
+The gate was written **beside the residency gate**, and adopted residency's all-modes trap policy.
+Residency and region **trap for every mode deliberately**, and both say so at length. The Sail:
+
+> *"If Bind-NoTrap or Rebind merely cleared Tag here, the caller would be told 'no such object' and
+> the pager would never be invoked -- a live object would look permanently destroyed."*
+
+The RTL enumerates the exceptions one at a time -- *"a region fault is the **FIRST** condition under
+which it must hard-trap"*, then *"RTL-6: the object residency fault is the **SECOND** condition ever
+to make Rebind hard-trap, and it needs its own exclusion for the same reason"*. **The domain
+violation arrived as a silent third in the same exclusion list.**
+
+**That argument does not transfer.** Region and residency traps exist so the holder goes and
+**services** something -- "your object is paged out, retry". **There is nothing to service on a
+domain refusal.** The object is not yours and will not become yours by running a pager.
+
+#### Why this is worse than tidiness: R43 was justified by a sentence the code made false
+
+R43 chose a soft-fail for its new Rebind refusal and said so explicitly: *"SOFT-FAIL, NOT A TRAP,
+deliberately: the comment directly above records that Rebind never traps for ANY failure reason, so
+a refusal that trapped would change the instruction's contract far beyond this finding."*
+
+**That sentence was false at source when R43 relied on it.** A decision was justified by a property
+the machine did not have. This is the R70 class -- a justification true when written and false when
+relied on -- with the difference that here the falsity was **already present** at the moment of
+reliance, not introduced later.
+
+#### The decision, and the argument that nearly went the other way
+
+**DECIDED: honour the mode.** Plain Bind traps `0x0B`; Bind-NoTrap and Rebind soft-fail.
+
+The strongest case for keeping the trap is that `owner_hart` is a **transient contention** condition
+("another hart holds it") while `owner_domain` is a **permanent policy** ("not yours, ever"), and a
+permanent refusal deserves to be loud so a bug is caught early. It does not survive: **choosing mode
+`0b01` IS the software's declaration that it wants the quiet answer.** An instruction whose entire
+purpose is to ask without faulting cannot have a failure reason that faults -- and code that is not
+deliberately probing uses plain Bind, which still traps loudly, so the early-bug case is unharmed.
+
+R14's rule that refusals must be visible is satisfied: **the cleared tag is the visible refusal**,
+and it is the mechanism Bind-NoTrap was given for exactly this purpose. Security does not decide it
+in either direction -- a soft-fail grants nothing, so both forms are fail-closed.
+
+#### The hazard the fix itself creates, closed in the same edit
+
+`$veda_owner_claim_en` carries `!$veda_domain_violation`, added by **R59** because a Bind refused for
+a domain must not take ownership of what it was just refused. R73 narrows `$veda_domain_violation`
+to plain Bind -- **so that guard stops covering Bind-NoTrap** -- and `$veda_bind_claim_en` never
+consulted the domain gate itself. Left alone, a NoTrap soft-failing on a domain refusal would have
+silently written `MHARTID` into the owner byte of an object it was just refused: **R59's bug,
+reopened by R59's own successor.** `$veda_bind_domain_ok` was therefore added to
+`$veda_bind_claim_en` in the same edit.
+
+Found by reading the consumer before landing. **No suite would have caught it**: the owner byte is
+invisible to every assertion in the corpus and `MHARTID` is 0 on this core -- the same two facts
+that let the original R59 bug live.
+
+#### Two soft-fail shapes, and a test that can tell them apart
+
+They are genuinely different and a tag-only check cannot distinguish them. Measured, both layers:
+
+```
+Rebind      : Base before 0x80011100 -> Tag 0, Base after 0x80011100   (fields PRESERVED)
+Bind-NoTrap : Base before 0x80011100 -> Tag 0, Base after 0x0          (register ZEROED)
+plain Bind  : traps once, mtval 0x6B = cap_idx 3, cause 0x0B
+```
+
+`vc_r73_bind_mode_refusal.S` and its RTL twin assert all three rows. **The plain-Bind row is the
+anti-vacuity control**: without it, a core that simply DELETED the domain gate would satisfy both
+soft-fail rows.
+
+#### The corpus damage, and why re-aiming it made two tests stronger
+
+Two Sail tests failed, both of which encode the old behaviour: `vc_r52_creation_domain.S` and
+`vc_r58_domain_writers.S`.
+
+**R52's entry in this register contains ZERO occurrences of "notrap", "soft-fail" or "Rebind" in
+6702 characters.** The trapping behaviour was recorded there as a **measurement** -- *"refused,
+DOMAIN_VIOLATION, exactly one trap"* -- and never argued as a decision. The test then froze the
+measurement into a contract.
+
+And **R52's tag assertion could not fail.** The bind trapped, a trap leaves `rd` untouched, and `c1`
+was never bound to anything -- so `cgettag c1` read the architectural reset value and asserted 0
+against a register that was already 0 for reasons having nothing to do with the gate. Only the trap
+count was load-bearing. Re-aimed, the file now loads a **real tagged capability first**, so a cleared
+tag is evidence the soft-fail genuinely wrote. It also gained the loud row it never had.
+
+**R58 had already written the reasoning down for the wrong row.** Its row (2) comment says: *"PLAIN
+Bind, not .notrap, and the distinction is the whole discriminator. Under .notrap a not-found object
+SOFT-FAILS with no trap, so the cause -- the only thing that says which way owner_domain went --
+never exists."* Row (1) then used `.notrap` and asserted a trap. **One author, one file, two
+understandings.** Row (1) is now the loud form, which is what its own verdict block always needed:
+it asserts the CAUSE, and a cause requires a trap.
+
+#### A search bug worth more than the finding
+
+The scan that concluded *"no test uses NoTrap or Rebind AND narrows a domain"* was wrong, and the
+pattern was the reason: it matched `x[0-9]*` and the failing tests write the operand as **`a1`**.
+**The ABI-alias hazard this project has already been bitten by three times in code extends to
+searches.** A grep that names registers numerically will silently miss every file that names them by
+ABI alias, and it fails as a **clean negative result** -- the most convincing kind of wrong answer.
+
+### R74. R71's retain mask was Machine-only, so the only software that needs it could not write it
+
+**Status: MEASURED, FIXED AND VERIFIED ON BOTH LAYERS. Sail 123/123, RTL 112/112, ACT4 51/51,
+differential 25/25. A defect in work landed the same day, found by refuting my own increment rather
+than by a suite. Fail-closed throughout -- the mask stayed zero and the crossing cleared everything,
+so nothing leaked. What was lost was the mechanism's usefulness, not its safety.**
+
+#### The defect
+
+Privilege on this machine is derived from the **CSR address**: `csrPriv(csr) = csr[9..8]`
+(`sys/sys_control.sail:19`), and the RTL computes the identical thing
+(`$csr_priv_violation = $is_csr_access && ($csr_priv_bits < $csr_addr[9:8])`). `0x7CA[9..8]` is
+`0b11`. **The retain mask was Machine-only on both layers.**
+
+R71's own write-up says: *"a compartment that wants to pass capabilities onward must set the CSR
+**itself**, from inside its own PCC window."* **Compartments are unprivileged by definition.** The
+instruction that sentence prescribes would trap.
+
+#### Measured, not deduced
+
+`veda_smoke_r48_oda_crossing.S` writes the mask **after** its architected drop to User. Its own trap
+counter read **2**, not 1 -- the mask write trapped, the mask stayed zero, the crossing cleared
+everything, and **the RTL suite passed 110/110 with nobody noticing**. The thirteenth green on this
+project that measured nothing. After the fix the same counter reads **1**.
+
+A scan of both corpora found this was the **only** such site: 96 of the 97 mask writes are at
+Machine. So the blast radius was one dead instruction -- and an architecture that could not do the
+thing it was designed for.
+
+#### Why it is worse than a dead write, and why it connects to R72
+
+With the register channel shut to unprivileged code and the memory channel (R72, open) asking no
+questions, **R71 pushed every User-mode delegation onto the one path with no governance.** A defect
+that makes the safe route unusable is a defect that routes traffic to the unsafe one.
+
+#### The fix, decided from the official specification rather than from convention
+
+The RISC-V Instruction Set Manual Volume II (Privileged Architecture), chapter *Control and Status
+Registers*, table *Allocation of RISC-V CSR address ranges*, was read in full. `csr[11:10]` encodes
+read/write versus read-only; `csr[9:8]` encodes the lowest privilege that may access the register.
+
+**`0x800`-`0x8FF` is the only Custom, read/write, User-level range in the entire table**, and unlike
+the Supervisor, Hypervisor and Machine custom ranges -- which are only the `11XX` quarter of their
+block -- its `csr[7:4]` field is unconstrained, so all 256 addresses are available. The
+specification also states that *"the CSR addresses designated for custom uses will not be redefined
+by future standard extensions"*, which is the collision guarantee this needs.
+
+**Chosen: `0x8CA`**, keeping the low byte of `0x7CA` so logs, traces and prose stay readable across
+the move. `csrPriv(0x8CA) = 0b00` (User) and `csrAccess(0x8CA) = 0b10` (not read-only), so
+**no privilege-check logic changed on either layer -- only the address constant**, at 115 sites
+across 57 files, verified by counting residual occurrences of the old address to zero.
+
+**`0xCC0`-`0xCFF` was rejected**: it is Custom **read-only**, and a write to a read-only CSR must
+raise an illegal instruction -- which is the one thing a retain mask may not do.
+
+#### The invariant this makes load-bearing, and it is a test rather than a comment
+
+Making a security register unprivileged deserves the obvious objection, and it was put in its
+strongest form: *letting the untrusted side write the boundary's policy inverts the trust
+relationship -- a compromised compartment writes `0xFFFF` and the crossing scrubs nothing.*
+
+**It fails as an argument about authority.** The mask is consumed as **retain-only**: a set bit
+suppresses a clear of a register the writer **already holds**. `0xFFFF` yields exactly the
+pre-crossing set -- the identity function, which is the state the machine was in before R71 existed.
+It cannot mint, widen or import anything, and a never-written mask is zero, so User-writability can
+only move the machine **from maximal scrubbing toward less scrubbing, never past it into new
+authority**. The attacker's best move is a hygiene regression, not an escalation. The alternative is
+incoherent: an M-only mask means the mechanism can never be exercised by the only software that has
+a reason to.
+
+**It survives, narrowed, as an obligation**: *retain must never become grant.* If any future path
+ever reads a set bit as "materialize this register" rather than "do not clear it", User-writability
+becomes escalation **on the spot**. So it is asserted, not asserted-in-prose:
+`vc_r74_umode_retain_mask.S` and its RTL twin retain `c9` **while it holds nothing**, and require
+that after the crossing it is still untagged AND that dereferencing it traps `0x02` TAG. Measured on
+both layers, and the RTL's `mtval = 0x122` names `cap_idx = 9` -- the refusal identifies the very
+register the mask retained.
+
+#### What the fix proves that could not be proved before
+
+```
+csrrw x0, veda_xretain, x31   at [U]   -> no trap          (it used to trap)
+ocl.d x21, c10                at [U]   -> 0xC0FFEE         (delegation from User, impossible before)
+cgettag x22, c9               at [U]   -> 0                (retained, still empty)
+ocl.d x25, c9                 at [U]   -> trap 0x02 TAG    (retained, still unusable)
+```
+
+The compartment also re-arms the mask **itself, from inside its own window**, before returning --
+the exact behaviour R71's text described and the machine could not perform.
+
+#### A new obligation, recorded now rather than discovered later
+
+The Smstateen extension's `mstateen0` register defines **bit 0 = C**, which *"controls access to any
+and all custom state"*. **That obligation did not exist while the mask was Machine-only and it exists
+from this increment onward**: if Veda-Core ever implements Smstateen, U-mode access to
+`veda_xretain` must be gated by the C bit. Nothing to build today -- the model implements no
+`stateen` -- but it is now a precondition on that work rather than a surprise inside it.
 
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
