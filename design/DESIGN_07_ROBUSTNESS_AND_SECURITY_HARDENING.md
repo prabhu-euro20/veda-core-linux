@@ -1152,6 +1152,75 @@ through `otype` sealing plus the region/domain gate.
 
 ### R43. Rebind does not check that the register it refreshes names the same object
 
+**Status: DECIDED AND CLOSED ON BOTH LAYERS. The instruction was narrowed rather than the
+specification amended, and closing it removed the LAST untagged sealedness read in the machine --
+which forced two existing tests to be re-aimed and settled a collision the register had not seen
+coming. Sail 118/118, RTL 107/107, ACT4 51/51, differential 25/25.
+Originally entered as RECORDED, NOT YET MEASURED; the original text follows.**
+
+#### The decision, and why this way round
+
+R43 offered two exits: narrow Rebind to a genuine refresh, or amend Section 4 so the specification
+stops describing a precondition the hardware does not enforce. **Narrowed.**
+
+- Leaving the two disagreeing is exactly the defect class R40 closed in the cause table.
+- Amending the specification would **permanently foreclose** Perms-from-register and leave the
+  landmine armed: R43's own text says the finding *"becomes one the moment anybody makes Rebind
+  preserve the holder's own Perms"*.
+- Hardware-first: the check is two comparisons on values already in registers.
+
+`CTag(rd)` and `cur.Object_ID == object_id`, both **soft-fail, not trap** -- the comment directly
+above the Rebind arm records that *"Rebind never traps for ANY failure reason"*, so a refusal that
+trapped would change the instruction's contract far beyond this finding. Tag first, because
+`isSealedCap` on an untagged register reads an otype that means nothing.
+
+#### The consequence nobody had noticed: the last untagged sealedness read
+
+Before landing anything I enumerated **every** `isSealedCap` consumer on both layers and checked each
+for a tag guard. OCInvoke and OCReturn check `CTag` on every operand first; CUnseal conjoins
+`CTag(cs1idx)` into its `ok`; the dereference path checks the tag first; the CGet family, CSeal,
+CSealEntry, CSetBounds and CAndPerm all conjoin it; the ODA predicate leads with `veda_oda_tag`.
+
+**Rebind was the only exception** -- and `vc_r24_crf_reset.S`'s own header says so in as many words:
+*"One enforcement decision reads sealedness with NO tag conjunct: Rebind soft-fails on
+`isSealedCap(destination)` alone."*
+
+So R43 closes the last one, and **the reset otype becomes unobservable**: no path can now read a
+register's sealedness without its tag.
+
+#### That settled a collision, and the collision is itself a finding of the CLASS B shape
+
+Two tests used **Rebind-into-an-untagged-register as their discriminator**, and both were green:
+
+| test | its probe | what it was protecting |
+|---|---|---|
+| `vc_r24_crf_reset.S` P1 | *"rebind into the NEVER-WRITTEN register must SUCCEED"* | the reset otype is the unsealed sentinel, not 0 |
+| `vc_r50_oclear.S` control 2 | *"a cleared register is still REBINDABLE"* | OCLEAR writes the sentinel rather than all-zeros |
+
+**R24's test named the weakness in its header and then asserted it as the contract.** That is
+precisely the class DESIGN_07 records three earlier instances of -- R27's CSR test,
+`vc_check_order.S` PHASE D, and `vc_ocl_ocs_c.S` -- each green while demonstrating the gap it was
+written to exercise. This is the fourth, and the first found by a fix colliding with it rather than
+by accident.
+
+Neither property becomes *wrong*; both become **unreachable**, which is what a fix should do. An
+all-zeros OCLEAR is now behaviourally identical to one writing the sentinel, because nothing can read
+that otype. Both tests are re-aimed to assert what still matters -- a never-written or cleared
+register is tag-0 and a plain Bind into it yields a usable capability -- and R24's P1 additionally
+now pins **R43's positive arm**: the test that pinned the gap pins the fix.
+
+#### Coverage
+
+`sail_tests/vc_r43_rebind_identity_neg.S` and `rtl/sim/veda_smoke_r43_rebind_identity.S` +
+testbench. Three controls: a genuine bind works, **rebinding the same object still works** (so
+refusing every Rebind cannot pass), and after a refusal a plain Bind still works (a refusal is a
+refusal, not a corruption). Two findings: a different Object_ID, and an untagged destination. And the
+whole file asserts **zero traps**, pinning the soft-fail contract.
+
+---
+
+**The original entry, kept verbatim:**
+
 **Status: RECORDED, NOT YET MEASURED. Found while refuting a proposed R38(b) closure. Not an
 escalation today, and entered now precisely so it is not discovered as one later.**
 
