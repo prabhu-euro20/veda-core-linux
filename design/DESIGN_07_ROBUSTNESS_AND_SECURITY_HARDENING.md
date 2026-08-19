@@ -5275,8 +5275,84 @@ here **unverified by me** so it is not lost and not overstated:
 > consumes belongs to a third principal. At depth 0 the restore body is skipped entirely, so a
 > following `mret` restores privilege while the bounds belonging to it are gone.
 
-I have **not** verified this at source and **not** attempted to refute it. It is a lead requiring its
-own pass, not R67.
+**Now closed as R67 below** -- verified at source, refuted unsuccessfully, measured, and fixed on
+both layers. The lead was right.
+
+### R67. The trap frame has an owner, not just a count -- and a callee could consume it
+
+**Status: MEASURED END TO END ON THE SHIPPED MODEL, THEN FIXED AND COVERED ON BOTH LAYERS. This was
+the stale-authority audit's SECOND survivor, recorded under R66 as an unnumbered lead that I had
+explicitly not verified. I verified it, tried to refute it, and it held.
+Sail 117/117, RTL 106/106, ACT4 51/51, differential 25/25.**
+
+#### One push, two pops, and no identity
+
+`veda_trap_frame_abandon` asks *"is a frame outstanding"* -- a **count** -- and never *"is this frame
+mine to abandon"* -- an **identity**. Verified at source: `veda_trap_depth` is written at exactly
+three places -- incremented once at trap entry, decremented at `restore_on_xret` and at `abandon` --
+and **OCInvoke touches it zero times**. So an OCRETURN executed by a principal that never trapped
+pops a frame it did not push.
+
+#### Measured, by instruction trace
+
+```
+compartment C traps            ->  veda_trap_status 1,  mepcc_length 0x40   (C's window)
+the handler OCInvokes into D   ->  veda_trap_status 1   (D never trapped)
+D executes OCRETURN            ->  veda_trap_status 0,  mepcc_length 0xFFFFFFFFFF
+```
+
+**C's frame is gone.** Any later `mret` then finds depth 0, skips the entire restore body, and C is
+never reinstated with its own bounds -- it resumes with whatever PCC and whatever `veda_pcc_object`
+are current, which is the compartment-escape shape R26 established the name predicate to prevent.
+
+After the fix the same binary reads `veda_trap_status 1` and `mepcc_length 0x40` at the landing.
+
+**R12's poison does not catch it.** Poison arms on a nested **trap**, and no trap occurred inside the
+handler. And the handler narrowing itself by OCInvoke is not an exotic case -- it is the case R12's
+own comment names as real.
+
+#### Refutations attempted, and why they fail
+
+- **"The handler chose to call D, so this is a handler bug."** The frame is not the handler's to give
+  away -- **it belongs to C**. A handler calling out must not be able to destroy a third principal's
+  right to be resumed. That is a confused deputy, and hardware-first says hardware closes it.
+- **"Is the outcome actually harmful?"** After the abandon nothing is restored, so C resumes with the
+  bounds and the **name** the last crossing installed rather than its own. R26 established that the
+  name is the trustworthy compartment predicate; this hands C a different one.
+
+#### The fix sharpens R12 rather than contradicting it
+
+R12 abandons the frame because OCRETURN *"installs PCC from its own operand, so any saved context is
+superseded by definition."* **That is true of the handler's EXIT and false of an OCRETURN that merely
+returns from a callee the handler invoked** -- there the handler is still running and the saved
+context is still owed. `veda_invoke_since_trap` is exactly that distinction and nothing more: OCInvoke
+increments it while a frame is outstanding, and OCRETURN decrements it **instead of** abandoning the
+frame whenever it is non-zero.
+
+**A counter, not an owner check, and the reason is the shipped switcher.** The switcher deliberately
+OCRETURNs to a **different** principal than the one that trapped -- that is what a scheduler does --
+so requiring the target to equal `veda_mepcc_object` would break the one path R12 was written for.
+The counter distinguishes *leaving* from *unwinding* without ever asking who the target is. Saturating
+at 0xFF, so a runaway cannot alias zero and turn the next OCRETURN back into an abandon. Reset to zero
+whenever the trap level ends, on **both** pop paths, and at the architectural reset.
+
+#### An RTL half-fix that would have been worse than none
+
+Gating only the depth arm left the **four frame-release arms** (`mepcc_base`, `mepcc_length`,
+`mepcc_object`, `trap_poison`) still keyed directly on `is_veda_ocreturn && depth == 1`. The RTL would
+have kept the depth at 1 while releasing the frame anyway -- a state neither layer models and a
+divergence that no existing test would have shown. All five sites now consult the counter, and the
+vacuity check strips all five.
+
+#### Coverage
+
+`sail_tests/vc_r67_frame_owner_neg.S` and `rtl/sim/veda_smoke_r67_frame_owner.S` + testbench. Both
+carry four controls before the finding -- the depth starts at zero, C really is narrow (`0x40`), the
+trap really pushed a frame, and that frame really is C's window -- so a machine that simply stopped
+tracking frames cannot pass. **The whole corpus passing is itself the load-bearing control**: the
+switcher's legitimate OCRETURN exit must still abandon its frame, and the scheduler tests would fail
+if it did not. The RTL half was shown to fail with the counter ungated at all five sites, and the
+strip was asserted to have landed before the run was believed.
 
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
