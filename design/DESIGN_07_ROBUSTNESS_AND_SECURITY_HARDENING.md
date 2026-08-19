@@ -8152,7 +8152,46 @@ which is the strongest evidence the analysis was right.
 trap on its `ecall`, enter the switcher, save its context, invoke the scheduler, toggle the thread index,
 return, and begin resuming thread 1 -- where before repair 1 it could not spill a single capability.
 
-#### The fifth fault, precisely located and NOT yet explained
+#### THE FIFTH FAULT, READ AND CLOSED -- AND IT IS R75/R76's OWN CREATION DEFAULT
+
+The switcher's guard `bne x28, x29, switcher_entry` spins on any non-`ecall` trap, so the fault could
+not be read. A **diagnostic build** replaced that spin with a reporting path (in scratch, not landed)
+and the answer came out at once:
+
+```
+  mcause 0x18   mtval 0x18b  ->  cap_idx = 0x18b >> 5 = 12,  cause = 0x18b & 0x1F = 0x0B
+                                 c12, VEDA_CAUSE_DOMAIN_VIOLATION
+```
+
+**And it explains why object 160 succeeded and 161 did not, which was the puzzle.**
+`resume_0` is reached the first time by a direct `j` from `veda_sched_run_asm`, with `veda_pcc_object`
+still the ambient sentinel -- so the bind gate's ambient arm applies. `resume_1` is reachable **only**
+through `after_scheduler_return`, which is reached by **`ocreturn c10`** -- and OCReturn installs
+`veda_pcc_object = cs1.Object_ID`, the sentry's object 168 in region 0. The ambient arm no longer
+applies, so the domain arm compares the code object's `VEDA_DOMAIN_BOOT` against region 0 and refuses.
+
+**`VEDA_DOMAIN_BOOT` is there because of R75/R76 increment 1**, which made ambient creation stamp BOOT
+instead of ANY so that an object is no longer public by accident. The switcher populates its thread code
+objects from boot and binds them from a named context. **Both test mirrors carry two `set.domain` calls
+each; the shipped file carried zero.**
+
+**Repair 5**: declare both thread code objects to **region 0** in `veda_sched_init_asm` -- the narrowest
+declaration that works, since the sentry lives in region 0, and exactly what the mirrors do. Sharing is a
+declaration, which is R52's own doctrine.
+
+#### CLOSED. THE SHIPPED SWITCHER RUNS, PASSES, AND IS NOW IN THE GATE
+
+`sail_tests/vc_r87_shipped_switcher_gated.S` -- **Sail 132/132**, RTL 112/112, ACT4 51/51, differential
+28/28, `verification.sh` **exit 0**. A change that breaks the switcher now breaks a suite.
+
+> **Five stale assumptions, from five different landings, in one file: the 256-bit capability respec,
+> R40's permission enforcement, R71's crossing clear, the Length widening 16 -> 40, and R75/R76's
+> creation default. Every one was absorbed by the two self-contained test mirrors and by nothing else.**
+>
+> None was anyone's mistake. Each was a change the file was never asked to survive -- and it was never
+> asked because nothing built it. **That is the whole cost of an ungated file, and it is now paid.**
+
+#### The fifth fault, as it stood before it was read
 
 `veda.bind c12, 161` traps, while the **identical** bind of object **160** succeeds thirty instructions
 earlier at `resume_0+32`. Both are first binds -- `veda_sched_init_asm` only **populates** 160 and 161,
