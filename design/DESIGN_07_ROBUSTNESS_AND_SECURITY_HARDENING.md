@@ -7769,9 +7769,49 @@ every User-mode capability access in the corpus:
 | `vmem_read` looks like the obvious call | it must **not** be used: it translates, splits pages and handles misalignment, none of which Veda may do -- `veda_check_access` already produced a physical address from the object's own bounds |
 | widths | the type checker refuses `Virtaddr(a)` because it must prove `(if xlen == 32 then 34 else 64) == xlen` for **all** `xlen`; R70's RV64-only gate is a runtime condition it cannot see. `veda_to_xlen(zero_extend(a))` is this file's own conversion (`veda_types.sail:185`) and is exact on RV64 |
 
-**Still open, deliberately:** the capability family (`OCL.C`/`OCS.C`) under DECISION 2 below, the NMC and
-Veda-Atomic families (unpriced), and **the RTL's total absence of a device model**, which Phase 3's timer
-will need. The finding below is kept in full because the reasoning is what made the fix mechanical.
+**INCREMENT 2 ALSO LANDED -- DECISION 2 IS NOW A RULE WITH A TEST.** `OCL.C`/`OCS.C` **refuse** on a
+device region with a new cause, **`VEDA_CAUSE_DEVICE_VIOLATION = 0x0D`** -- the next free code after
+RESIDENCY `0x0A`, DOMAIN `0x0B` and COW `0x0C`. Sail **131/131**, everything else unchanged, exit 0.
+
+**Why a refusal and not a tag-strip, stated once more because it is the fifth time:** `mmio_write` takes
+no `meta`, so routing the capability family through it would make a capability stored to a device
+**silently lose its tag** -- stored-looking and dead on the next load. **A silent downgrade is the shape
+this register has now refused five times**: R38's attenuation (`CAndPerm` could clear it), R72's
+entitlement (it travelled through memory), R77's identity (`csrw` could switch its enforcement off),
+R81's window (it bounded creation and not binding), and this.
+
+**And it is deliberately NOT the standard access fault that DECISION 1 uses.** A device *error* answers
+*"it did not work"*; this answers *"you were not permitted"*. That is exactly the distinction **R64**
+built a separate fault channel to preserve, so it gets its own cause rather than borrowing one.
+
+**The test carries an ANTI-REGRESSION control, not just anti-vacuity ones.**
+`sail_tests/vc_r84b_capability_not_device.S`, five rows:
+
+```
+  A  OCS.C into the CLINT       REFUSED, cause 0x0D
+  B  OCS.C into ordinary RAM    SUCCEEDS          <- not a blanket ban
+  C  OCL.C out of the CLINT     REFUSED, cause 0x0D
+  D  OCL.C out of ordinary RAM  SUCCEEDS, cgettag 1  <- and it round-trips
+  E  OCL.D out of the CLINT     SUCCEEDS, no trap    <- INCREMENT 1 STILL STANDS
+```
+
+**Row E is the one that matters most**, and it is a kind of control this register has not used before:
+without it, the file would pass just as happily on a machine that had **broken increment 1** and cut the
+data family off from devices again. An anti-vacuity control proves the rule can fire; an
+**anti-regression** control proves the rule did not eat the feature it was carved out of.
+
+**A detail found while choosing the test's device, worth recording because it is a real gap:** HTIF could
+not be used. Its term in `within_mmio_writable` is gated `& 'n <= 8` (`sys/platform.sail:357`), so a
+**32-byte access to the HTIF address is not classified as MMIO at all** and would quietly write RAM
+underneath the device. The CLINT (base `0x2000000`, size `0xC0000` in this project's config) has no such
+gate. **That HTIF gap is upstream behaviour, not Veda's**, and it is recorded rather than fixed here.
+
+**Neuter proof:** remove both refusals and `vc_r84b_capability_not_device` fails, 130/131.
+
+**Still open, deliberately:** the NMC and Veda-Atomic families (unpriced -- both are read-modify-write,
+meaningful against some device registers and meaningless against others, which needs Phase 3's device
+model), and **the RTL's total absence of a device model**. The finding below is kept in full because the
+reasoning is what made the fix mechanical.
 
 ---
 
