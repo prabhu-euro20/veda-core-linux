@@ -5559,6 +5559,96 @@ instruction, an object whose old Base is outside the window, still refused** -- 
 broke Populate for delegated actors cannot pass. Zero corpus damage: no existing test relied on
 minting over a paged-out object.
 
+### R69. Page-in is Machine-only -- an evictor test implemented by proxy through an address
+
+**Status: DECIDED AND CLOSED ON BOTH LAYERS. Sail 120/120, RTL 109/109, ACT4 51/51, differential
+25/25. Decided by a 21-agent adversarial pass on the question R68 left open, then verified at source
+before landing. This closes the last two of the seven ODA authority sites.**
+
+#### The rule, stated once and applied uniformly
+
+> **A delegated actor may write an ODT entry only while the object still occupies memory that actor
+> demonstrably holds. An object that is not resident occupies nothing, so no delegated actor may
+> write its entry. Machine is exempt, because it is never window-tested.**
+
+**At `page.in` the rule collapses to Machine-only, and that is a consequence rather than a special
+case:** the clause's own gate already refuses `not(valid) | resident`, so **every** delegated
+execution of page-in was a non-resident one. There was no delegated case left to authorize.
+
+#### The defect is sharper than R65's framing, and that is what decides the fix
+
+Page-out is the **sole producer** of `{valid, not resident}`, and its own gate refuses a non-resident
+entry -- verified at source: `else if not(old_entry.valid) | not(old_entry.resident) then
+Illegal_Instruction()`. So page-out's window test **always ran against a live `Base`**, and the
+`Base` it then preserves is **the record of the eviction authority**.
+
+Page-in's first ODA conjunct was therefore not merely *"a test against a dead value"* -- R65's
+framing -- but an **evictor test implemented by proxy through an address**. Right in shape, unsound
+in mechanism: **the proxy decays the instant the frame becomes reallocatable, which is the instant the
+eviction completes.**
+
+#### Why no substitute predicate can work
+
+The legitimate delegated pager and the R68-standing attacker present **identical evidence**. The
+pager evicted the victim, so it holds the freed frame and a destination frame in the same pool. The
+attacker acquired a window over the freed frame *after* the eviction -- exactly R68's own standing
+clause -- and holds a destination frame. Both satisfy *ODA covers old Base* **and** *ODA covers new
+base*. The only differentiating fact is **who evicted**, and page-out records nothing about it: its
+write changes exactly `generation` and `resident`.
+
+They are not hard to tell apart. **They are indistinguishable given the state this machine keeps.**
+
+#### "You may repair what you evicted" is the right rule and does not fit -- measured, not assumed
+
+`ODT_ENTRY_BYTES` is 32 with offsets running 0..29, so **16 spare bits** -- not the 20 a domain needs,
+nor the 44 an Object_ID needs. It would hold an 8-bit hart, and a hart is not a principal: page-in
+preserves `owner_hart` *precisely* so a pager cannot claim ownership. And the entry cannot be widened
+by changing a localparam: the 32-byte stride is baked into **107 hard-coded seed offsets across 11
+entry bases**. So: fail closed.
+
+#### The lockout costs nothing constructible, and that was verified rather than argued
+
+A delegated pager **cannot learn which object faulted**:
+
+- the residency trap **does** stage the name -- `veda_trap_obj` sets `veda_mfaultobj`, the R64 channel;
+- but **CSR 0x7C9 is Machine-only by its address**: `csrPriv(csr) = csr[9 .. 8]`, and `0x7C9` gives
+  `0b11`. Verified at source in `sys/sys_control.sail`;
+- and `mtval` carries only `{cap_idx, cause}`.
+
+**So delegated demand paging was never constructible on this machine -- and not because page-in
+refused it.** This also kills the strongest rival rule outright: keying page-in on `object_id ==
+veda_mfaultobj` would authorize a delegate by a value it cannot read, on a fault it cannot observe.
+
+**Zero corpus damage confirmed that empirically** -- not one of 120 tests relied on a delegated
+page-in.
+
+#### The ODA constructs are deleted, not left standing
+
+The refusal is an unconditional `cur_privilege != Machine` placed **first**, and the three ODA
+constructs it makes unreachable are **removed**. Two reasons, both load-bearing:
+
+- `veda_stale_authority` would have been the **wrong term** here: it requires `e.valid`, so pasting it
+  verbatim would leave an invalid entry uncovered if the gate below were ever relaxed -- and Destroy
+  preserves `Base` and `Length` on an invalidated slot, which is exactly that entry. An unconditional
+  privilege refusal depends on nothing.
+- Leaving terms that read as tests and cannot fail **is** the expired-justification defect this
+  register keeps paying for.
+
+#### Rejected on the way, recorded so it is not re-raised
+
+**Writing the evictor's identity into the provably dead `Base` field.** It fits in 56 bits and needs
+no new state. Rejected: a record field whose *type* depends on `resident` is the R41/R59 shape, better
+hidden -- and it would break the RTL's seeded `{valid, not resident}` fixtures.
+
+#### Coverage
+
+`sail_tests/vc_r69_pagein_machine_only_neg.S` and `rtl/sim/veda_smoke_r69_pagein_machine_only.S` +
+testbench. The delegated actor is given **an ODA covering both frames** -- the strongest window a
+delegate could hold -- so the refusal cannot be attributed to a narrow window. And the
+**anti-lockout control is the load-bearing one**: Machine's page-in must still succeed and the object
+must come back usable at the new frame. A rule that stranded data would be a bug, not a fix, and this
+test would catch it.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
