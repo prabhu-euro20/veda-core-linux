@@ -6193,7 +6193,41 @@ of it: the R52 bind gate (`veda_regs.sail:1165-1168`), the creating domain a Pop
 **That register can be installed by a principal that was never given the identity, in three
 instructions, whose only input is a NAME.**
 
-#### The asymmetry, which is the whole finding
+#### CORRECTION, SAME DAY, BY MEASUREMENT -- THE ASYMMETRY BELOW IS FALSE
+
+**The paragraph that followed is kept because it is what I believed and acted on, and because the
+correction is worth more than the claim.** I wrote that `OCInvoke` demands evidence of delegation and
+`OCReturn` does not, and I proposed making the return path symmetric with the call path. **I then
+tested my own hypothesis instead of building on it, and it failed.**
+
+`poc_r75b_forged_sealed_pair.S`: the same compartment B, refused the same object, binds the **type
+authority object by name** -- because it too is created ambiently with `owner_domain = ANY` -- mints
+its **own** matching sealed pair from A's code object and an INVOKE-only data object, and executes
+
+```
+veda.bind c7, TYPEAUTH ; veda.bind c8, CODE_A ; veda.bind c9, DATA
+cseal c10, c8, c7      ; cseal c11, c9, c7    ; ocinvoke c10, c11
+```
+
+**It succeeds.** `cgettag` on the previously-refused object reads **1**, the secret reads
+**0xC0FFEE**, and the run takes **one trap in total** -- the final `ecall` that reaches the verdict.
+
+**So BOTH crossings are forgeable, and a sealed pair is evidence of nothing while the seal authority
+is itself bindable by name.** Every "make OCReturn symmetric with OCInvoke" proposal -- including the
+one this entry originally advanced -- is therefore worthless: it would make the return path as strong
+as a call path that is already broken.
+
+**WHAT THIS DOES TO THE DIAGNOSIS.** R75 is not an instruction-level defect in OCReturn. It is
+**R52's remaining half arriving at the identity**: R52 recorded that *a name is still full authority*
+and narrowed the creation default only for objects created **inside** a compartment. Every object
+made in the ambient boot context -- every code object, every data object, and **every type
+authority** -- stays open, and the machine's domain identity is assembled out of them. The fix
+therefore belongs where authority is **granted**, not where it is **spent**, and any mechanism that
+adds a test to a crossing while the ingredients stay open is decoration.
+
+The original paragraph, kept verbatim:
+
+#### The asymmetry, which I believed and which is FALSE in the default configuration
 
 `OCInvoke` demands a **sealed pair** -- `cs1` code and `cs2` data with matching `otype`. A matching
 pair can only be minted with a capability carrying `PERM_SEAL`, so the pair is **evidence that the
@@ -6275,7 +6309,22 @@ livelocked a test.
    (a bounds and provenance fact) and "which domain may I name" (an authority fact). OCReturn has a
    legitimate need for the first and no business granting the second.
 
-Direction 2 is the one to price first. It is stated here as a lead, not a decision.
+**ALL THREE DIRECTIONS ARE DOWNGRADED BY THE CORRECTION ABOVE.** They each add a test to a crossing,
+and the correction shows the crossing is not where the authority is acquired. They are kept as
+material for the mechanism pass, not as the shortlist they were when written.
+
+**What the correction promotes instead**: the creation default. `owner_domain = VEDA_DOMAIN_ANY` is
+what makes the code object, the data object AND the seal authority all acquirable by name, and it is
+the single value every one of the four attack steps depends on. The counter-argument is R17's
+retraction and R52's own ambient arm -- the boot context's objects are left open **deliberately**, so
+that return paths, type authorities and shared services stay bindable from anywhere, and closing them
+made compartments one-way. **That tension is the real open question, and it is not resolved here.**
+
+A second framing the correction makes available: the machine has **no principal that is trusted to
+enter other domains**. The shipped switcher needs exactly the powers the attacker used -- it binds
+thread code objects by name at `runtime/veda_sched_asm.S:296` and `:307` and mints its own sentries
+at `:331` -- so the two cannot be told apart by instruction, only by authority the machine does not
+currently represent.
 
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
