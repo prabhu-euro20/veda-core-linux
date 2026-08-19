@@ -6177,6 +6177,106 @@ from this increment onward**: if Veda-Core ever implements Smstateen, U-mode acc
 `veda_xretain` must be gated by the C bit. Nothing to build today -- the model implements no
 `stateen` -- but it is now a precondition on that work rather than a surprise inside it.
 
+### R75. The return path is an entry path, and it has no admission control -- domain identity is forgeable from a name
+
+**Status: MEASURED ON BOTH LAYERS, IDENTICAL VALUES. OPEN, AND IT BLOCKS R72. Every claim below was
+re-read at source by me before it was written down; the lead came from an adversarial security lens
+that constructed the chain, and constructing a chain is not measuring one. This is the largest open
+finding in the register.**
+
+#### What it says
+
+`veda_pcc_object` is the machine's **domain identity**. Every domain question asked anywhere is asked
+of it: the R52 bind gate (`veda_regs.sail:1165-1168`), the creating domain a Populate records
+(`veda_ocl_insts.sail:715-717`), R62's nameable check, R73's mode-dependent refusal.
+
+**That register can be installed by a principal that was never given the identity, in three
+instructions, whose only input is a NAME.**
+
+#### The asymmetry, which is the whole finding
+
+`OCInvoke` demands a **sealed pair** -- `cs1` code and `cs2` data with matching `otype`. A matching
+pair can only be minted with a capability carrying `PERM_SEAL`, so the pair is **evidence that the
+owning domain minted and handed over an entry**. That is real admission control.
+
+`OCReturn` demands only a **sentry**. And `CSealEntry`'s complete authorisation, read at
+`veda_cap_insts.sail:413`, is:
+
+```
+let ok : bool = CTag(cs1idx) & not(isSealedCap(cs1));
+```
+
+**No operand, no permission, no privilege.** Any holder of any tagged unsealed capability mints a
+sentry from it.
+
+OCReturn's guard chain (`veda_cap_insts.sail:887-905`) asks tag, sealed, `otype == SENTRY`,
+`PERM_EXECUTE`, region rt-resident, and then `veda_code_object_check` -- **whose entire body
+(`:535-545`) is `valid`, `generation`, `resident`**. There is no domain term and no owner term.
+Then `:924` executes `veda_pcc_object = cs1.Object_ID;`.
+
+**So the instruction that RETURNS from a compartment is an unauthenticated ENTRY into one.**
+
+#### Measured, with a control, on both layers
+
+The probe locks an object to domain 0 and enters a region-1 compartment carrying nothing.
+
+```
+BEFORE  veda.bind.notrap c5, 300   ->  cgettag 0    REFUSED     (0 traps -- R73's quiet form)
+FORGE   veda.bind c9, 301              (A's code object, owner_domain ANY -- the default)
+        csealentry c9, c9              (authorised by the tag alone)
+        ocreturn c9                    (installs A's Object_ID as the identity)
+AFTER   veda.bind.notrap c6, 300   ->  cgettag 1    SUCCEEDED
+        ocl.d x23, c6             ->  0xC0FFEE     the secret
+                                       ZERO TRAPS along the entire chain
+```
+
+**The same instruction, on the same object, refused before and permitted after.** The RTL reproduces
+every value. The control is load-bearing: without the refusal first, a machine on which everything
+binds would satisfy the attack rows for entirely the wrong reason.
+
+#### Why the default configuration is the vulnerable one
+
+The forge needs a capability to **A's code object**, and it gets one because
+`owner_domain = VEDA_DOMAIN_ANY` is the value every object is created with, and
+`veda_bind_perms(e) = e.Perms`, so the binder receives `PERM_EXECUTE` verbatim. **Every code fixture
+in this corpus is created that way.** R52 narrowed the *creation* default for objects made inside a
+compartment; objects made in the ambient boot context -- which is where every code object is made --
+stay open, deliberately, because R17's retraction proved that closing them breaks the return path.
+
+#### This blocks R72, and that is the reason it is recorded before R72's mechanism is chosen
+
+R72's design pass produced four candidate mechanisms. **Three of them are defeated by this chain
+without touching the memory channel at all**, because each asks "which domain am I" and this makes
+that question forgeable:
+
+- a `flags`-borne mint-domain stamp is stamped from the forged register, so it validates;
+- an ODT containment rule never runs, because the attacker stores nothing;
+- and the argument that `owner_domain` is a sound mint-time gate is simply false.
+
+**A mechanism keyed on domain identity cannot be chosen until the identity is sound.** Building one
+first would be the R43 shape again -- a design justified by a property the machine does not have.
+
+#### Directions, none chosen, and the constraint each must satisfy
+
+The binding constraint is **R17's retraction**: a compartment's caller is by construction in another
+domain, so OCReturn may not simply demand a matching domain -- that made compartments one-way and
+livelocked a test.
+
+1. **Authenticate the sentry.** `VEDA_OTYPE_SENTRY` is a single fixed value, so every sentry is
+   interchangeable and provenance is unrepresentable. Giving sentries a minting authority would
+   mirror `CSeal`'s -- but CHERI's `CSealEntry` is deliberately unprivileged, and the reason that is
+   safe there is that a CHERI sentry does **not** change compartment identity. **The asymmetry is in
+   OCReturn, not in CSealEntry**, and a fix that taxes CSealEntry is taxing the wrong instruction.
+2. **Return to where you came from.** The machine already saves caller state -- `veda_saved_region`,
+   the CRBR shadow R60 releases, and R67's trap-frame ownership. A return that must match the saved
+   caller is precise, uses state that already exists, and is R17-safe by construction, because the
+   saved value IS the other domain.
+3. **Separate the two duties of `veda_pcc_object`.** It is simultaneously "which code am I running"
+   (a bounds and provenance fact) and "which domain may I name" (an authority fact). OCReturn has a
+   legitimate need for the first and no business granting the second.
+
+Direction 2 is the one to price first. It is stated here as a lead, not a decision.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
