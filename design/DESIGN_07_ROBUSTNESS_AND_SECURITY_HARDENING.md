@@ -6490,6 +6490,33 @@ catch, and the exact "half a fix is worse than none" state R50 increment 2 and R
 So: reverted clean, tree green at 123/123, probes open again and verified open, mechanism settled,
 cost known. **What the next pass owes is execution, not design.**
 
+#### The re-aiming was ATTEMPTED, and it is not uniformly mechanical -- measured
+
+The eight-file bill was worked rather than estimated, driven by a loop that traced each failure,
+read the refused Object_ID out of the trace, inserted one ambient `set.domain`, rebuilt and re-ran.
+What came back splits the bill into two kinds, and the split is the useful result:
+
+- **Mechanical, and already demonstrated green**: `vc_r10_crbr_invoke_trap_return` and
+  `vc_r73_bind_mode_refusal` each needed **one** delegation; `vc_r50i2_crossing_clear` needed
+  **five**, all of the same shape, because its `setup:` block is re-entered after an OCReturn and
+  therefore re-binds everything from inside a compartment.
+- **A design statement, not an edit**: `vc_r52_creation_domain` and `vc_r58_domain_writers` are the
+  domain-policy tests themselves. Their shared objects are bound from compartments in **two different
+  regions**, and an object has one `owner_domain` -- so no single delegation unblocks them. **The
+  correct answer for those objects is an explicit `VEDA_DOMAIN_ANY`, which is the mechanism working
+  as designed**: sharing becomes something the file declares rather than something it inherits. That
+  is a statement about what each test means and it must be written deliberately, not scripted.
+- **Different in kind**: `vc_bind_domain_neg` fails with no refused bind in its trace at all, so its
+  failure is downstream of the gate and needs reading rather than iterating.
+
+**A hazard for whoever executes this, found the hard way.** The first generated delegations used
+`x28/x29/x30` as scratch, and `vc_r52_creation_domain` uses `t3`, `t4` and `t5` -- **the same three
+registers**. That is the ABI-alias trap this register has now recorded four times, and the third time
+in this session, and it appeared here in **generated** code where no human was reading the operands.
+Any scripted re-aim must compute free registers per file, and must do it from the instruction
+operands rather than from a text scan, because a naive scan counts words in comments and reports that
+a file has none.
+
 #### What this does NOT close, stated now
 
 - **Region granularity.** The shipped switcher puts every object in region 0, so any region-keyed rule
