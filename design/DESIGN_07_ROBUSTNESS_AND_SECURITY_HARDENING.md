@@ -8135,6 +8135,40 @@ never asked to survive.
 > not merely risk citing stale code -- **it cited code that does not run at all**, in five separate cost
 > arguments, for months.
 
+#### FOUR REPAIRS LANDED, EACH ONE MEASURED TO MOVE THE FAILURE EXACTLY WHERE PREDICTED
+
+The repairs were applied **one at a time, re-running after each**, so every fix is attributable rather
+than bundled. The failure moved through the four breakages **in the order the analysis predicted**,
+which is the strongest evidence the analysis was right.
+
+| after | the switcher reaches | and stops at |
+|---|---|---|
+| *(before any repair)* | nothing | `MEPC 0x80000214` -- `ocs.c c6, x5(=32), c11`, the first capability spill |
+| **repair 1+2** save areas 48 -> **64 bytes**, capability slot 16 -> **32**, `.align 4` -> **5** (OCL.C/OCS.C need 32-byte alignment), Perms `0x000C` -> **`0x003C`** | init, `resume_0`, `ocl.c` **succeeds**, `do_resume`, `ocreturn`, **thread0 executes its `ecall`**, the switcher is entered and its `mcause == 11` guard **passes** | `ocs.d c6` at `yielding_is_0+4` -- **`c6` had been cleared by the crossing** |
+| **repair 3** `csrw 0x8CA` retain declarations at all **three** crossings (`:232`, `:283`, `:347`) | the scheduler runs, toggles `thread_index` through `c8` (**which now survives**), `ocreturn c10` succeeds, `after_scheduler_return` | the ordinary `lw` at `after_scheduler_return+8` -- **PCC was narrowed to 65535 bytes**, not unbounded |
+| **repair 4** sentry source 168 moves to **`populate.fast`** with `veda_attr` carrying the full 40-bit `VEDA_PCC_UNBOUNDED` (plain Populate's descriptor **cannot express it** -- Length is 16 bits by deliberate encoding limit) | that `lw` **succeeds**, `resume_1` runs -- `ospecialrw`, two `ocl.d`, `ocl.c c11, c7` | **`veda.bind c12, 161`** at `resume_1+32` |
+
+**The switcher now completes most of a full round-robin cycle** -- initialise, resume thread 0, run it,
+trap on its `ecall`, enter the switcher, save its context, invoke the scheduler, toggle the thread index,
+return, and begin resuming thread 1 -- where before repair 1 it could not spill a single capability.
+
+#### The fifth fault, precisely located and NOT yet explained
+
+`veda.bind c12, 161` traps, while the **identical** bind of object **160** succeeds thirty instructions
+earlier at `resume_0+32`. Both are first binds -- `veda_sched_init_asm` only **populates** 160 and 161,
+never binds them. **One hypothesis was formed and tested and was wrong**: that retain-all was preserving
+a sealed sentry in `c12` and the bind refused a sealed destination. Dropping `c12` from that site's mask
+(`0xFFFF` -> `0xEFFF`) changed nothing, and reading `veda_bind_insts.sail:456` shows the `isSealedCap`
+check is in the **Rebind** clause, not plain Bind. Reverted; recorded as a refuted hypothesis rather
+than left as a guess.
+
+**Deliberately not chased further in this pass.** The four repairs are each independently verified and
+the suite is green at 131/131; guessing at a fifth would be the thing this register punishes. What the
+next increment needs is a diagnostic that can *read* `mcause`/`mtval` at that point, which the switcher's
+own guard currently prevents by spinning -- and that guard, `bne x28, x29, switcher_entry` with its
+comment *"real fault recovery out of scope this pass"*, is itself worth replacing with something that
+reports.
+
 #### DECIDED: R83's step 2 does not start by converting that file
 
 Converting 13 ordinary accesses in a file no suite compiles would produce **exactly the zero corpus cost
