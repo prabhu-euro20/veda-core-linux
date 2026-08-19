@@ -6886,6 +6886,126 @@ has nothing sensible to do except trap -- but that is a conformance decision wit
 this register contains four designs refuted for being chosen before they were priced.
 
 
+#### INCREMENT 1 ATTEMPTED AND REFUTED BY A CYCLE -- and one half of the decision above is now CORRECTED
+
+**Built on paper, priced, attacked by five independent adversaries and a judge, and NOT LANDED.**
+Kept in full, because the refutation is worth more than the mechanism and because one half of the
+recorded decision turns out to be wrong in the design's own favour.
+
+##### The diagnosis, sharper than the decision it was built from
+
+`veda_pcc_object == VEDA_OBJECT_NONE` answers **two different questions**, and nothing separates them:
+
+| | question | consumers |
+|---|---|---|
+| **(A)** | *am I unconfined / is a compartment live* | mtvec gate `veda_regs.sail:564`; the five CSR escape gates `:729 :734 :739 :744 :770`; `veda_trap_level_has_context :1171`. The RTL **fuses all six into one comparator**, `veda_core.tlv:5581-5595` |
+| **(B)** | *what is my domain identity* | `veda_bind_domain_ok` arm 2 `:1167`; `veda_creating_domain` (`veda_ocl_insts.sail:728`); `VEDA_ODT_SET_DOMAIN`'s R76 ownership term (`:1316`) |
+
+`veda_regs.sail:1455-1459` records that R26 chose the (A) predicate **deliberately** -- *"the NAME,
+`veda_pcc_object != VEDA_OBJECT_NONE`, because the Length sentinel is forgeable."* Before R75/R76
+increment 1, (B) was vacuous, so the overload cost nothing. **Increment 1 made (B) load-bearing and
+thereby made the overload a defect.** R77 is the bill for that, and this diagnosis stands whatever
+mechanism eventually lands.
+
+##### THE SURVIVING RESULT: decision point 3 above is WRONG, and five adversaries failed to break the correction
+
+The decision says the narrowing must be a **mandatory obligation** because *"a root-authority reset is
+unavoidable"*. **That is true for CHERI and false for Veda, and the reason is decision point 2 itself.**
+
+- CHERI ISAv9 Table 4.3 resets MTCC to **infinity**; CHERIoT ISA v1.0 Table 7.2 resets it to
+  **root-X**; CHERIoT 7.11 states an untagged MTCC yields *"an unrecoverable exception loop."*
+  **In both, MTCC IS THE FETCH AUTHORITY** -- it must be a working code capability at reset or the
+  machine cannot take a trap at all.
+- **In Veda the vector's fetch authority is `mtvec`, a plain address.** Verified at source: fetch
+  bounding reads `veda_pcc_length` alone (`postlude/step_ext.sail:95-97`) and trap entry sets it
+  `VEDA_PCC_UNBOUNDED` (`veda_regs.sail:350`). **An identity that owns nothing still fetches.**
+
+So Veda's vector identity **can** reset to nobody, the never-configured state **is** the safe one, and
+**no obligation mechanism is needed** -- which also deletes the trap-loop hazard and leaves untouched
+the **5 Sail and 4 RTL tests that cross a compartment boundary without installing any vector at all**
+(`vc_ocinvoke.S`, `vc_ocreturn_basic.S`, `vc_pcc_bounds.S`, `vc_switcher_register_clear.S`,
+`vc_switcher_register_clear_fast_return.S`; `veda_smoke_m10.S`, `veda_smoke_m14.S`,
+`veda_smoke_mosB_sentry.S`, `veda_smoke_ssc_spill_reload.S`). **All five refuters attacked this
+argument and all five failed.** It is the one part of the increment that is kept.
+
+This is the separation decision (b) made for architectural-grain reasons -- identity, not capability --
+turning out to also solve the bootstrap problem **both prior systems concede in writing.**
+
+##### THE REFUTATION: THE CYCLE. An identity is advisory while its holder can Populate without bound
+
+The mechanism was a new sentinel `VEDA_OBJECT_NOBODY` (region `0xFFFFD`) installed by trap entry, so
+that all three (B) consumers would close *without being edited*, because none of them would match.
+Two refuters found the same defect independently, and it is fatal:
+
+```
+handler at NOBODY
+  populate    -> owner_domain := veda_creating_domain() = veda_pcc_object[43..24] = 0xFFFFD
+                                          veda_ocl_insts.sail:906 and :727-729
+  bind arm 3  -> owner_domain == veda_pcc_object[43..24] -> 0xFFFFD == 0xFFFFD   PASS
+                                          veda_regs.sail:1168
+  set.domain  -> R76 term: old.owner_domain == veda_pcc_object[43..24]           PASS
+                                          veda_ocl_insts.sail:1317
+```
+
+**The three consumers are not three closures. They are one loop.** *"A handler's creations are owned by
+nobody"* is false -- **they are owned by the handler**, whatever region you give it. And the handler
+can create an object over **all of memory**, needing to know nothing, because the model says so in its
+own words at `veda_regs.sail:1438-1439`: *"nothing in this design makes two Object_IDs disjoint --
+Populate takes Base verbatim and no overlap test exists anywhere."* Every guard on that path is dead at
+Machine privilege: `veda_oda_denies` (`veda_ocl_insts.sail:705`) and `veda_stale_authority`
+(`veda_regs.sail:1336`) both lead with `cur_privilege != Machine`, and `veda_object_is_executing`
+cannot see a fresh alias because both window arms are qualified on the slot's **old** occupant's
+`e.valid` (`veda_regs.sail:1505-1517`), so a free slot is tested against nothing.
+
+**`poc_r77_trap_is_ambient.S` still succeeds -- in three instructions instead of one.** My own narrow
+claim, *"the fix stops a handler MINTING a capability to an object it was not given; it does not stop
+it MANUFACTURING one"*, rested on a distinction that **does not exist**: Populate does not manufacture
+a fresh object, it manufactures an **alias onto the victim's exact bytes**.
+
+> **THE GENERAL STATEMENT, and it is the fourth time this register has written one like it:
+> AN IDENTITY IS ADVISORY WHILE THE PRINCIPAL HOLDING IT CAN POPULATE WITHOUT BOUND.**
+> Naming a principal cannot constrain it if naming is downstream of an unbounded creation primitive.
+
+##### Three corrections to my own claims, made because a wrong pointer is worse than a wrong claim
+
+1. **My claimed precedent was wrong, and dangerously so.** I cited `veda_mfaultobj` (CSR 0x7C9, same
+   44-bit width) as the *exact* precedent for a writable 44-bit Veda CSR. It is **read-only**:
+   `is_CSR_accessible(0x7C9, _, access_type) = ... & (access_type == CSRRead)` (`veda_regs.sail:645`)
+   and **`write_CSR(0x7C9)` does not exist** -- clause count zero, verified. Worse, the point behind
+   the correction stands on its own: **a 0x7CB gated only by `csrPriv` would be writable by the very
+   Machine-mode handler it exists to confine**, letting it choose its own next identity. Any rebuild
+   must gate the write exactly where `mtvec`'s own write is gated (`veda_regs.sail:564`), so that only
+   the ambient bootstrap context may name the vector.
+2. **My corpus cost was wrong in both directions.** My scanner classified `destroy`, `populate` and
+   `populate.fast` as domain-authority instructions; they are **Machine-gated, not domain-gated**
+   (`veda_ocl_insts.sail:732, 917, 1046`), so `vc_r11b_executing_pin_neg.S` and `veda_smoke_r11b_pin.S`
+   are **not costs at all**. `vc_r10_ocinvoke_region_fault_neg.S` binds Object_ID 1, which is
+   reset-seeded `VEDA_DOMAIN_ANY` (`veda_regs.sail:1585`), so arm 1 passes and it is **not a cost**
+   either. And I **missed** the Sail original `vc_syscall0_kernel.S`, whose handler binds at `:199`,
+   `:255` and `:260` against boot-populated objects -- three real breaks I listed only in the RTL twin.
+3. **My first (A) predicate was a regression, which I caught myself before the refuters reported and
+   which three of them then found independently.** `veda_pcc_object == VEDA_OBJECT_NONE |
+   veda_trap_depth != zeros()` calls a compartment **OCInvoked from inside a handler** unconfined --
+   `veda_trap_depth` means *a return is owed*, not *unconfined*, and OCInvoke never touches it
+   (`veda_cap_insts.sail:729-731` bumps only `veda_invoke_since_trap`, R67). The shipped switcher does
+   exactly that OCInvoke at `runtime/veda_sched_asm.S:268`. The correct predicate is a **value** test,
+   `veda_pcc_object == VEDA_OBJECT_NONE | veda_pcc_object == VEDA_OBJECT_NOBODY`, with no depth term
+   at all. Recorded for whoever rebuilds this.
+
+##### DECIDED: do not build the identity yet. Bound the creation primitive first
+
+**The sequencing is the finding.** `0x7CB` is cheap, standard-conforming and correct -- **after** the
+handler's Populate authority is bounded, and worthless before it. The correct next increments are
+therefore **R79** (below) and the alias/disjointness rule **R45 deferred and R1 owns**. Either one makes
+an identity mean something. This register already holds four designs refuted for being chosen before
+they were priced; this is the fifth, and it was caught before it landed rather than after.
+
+Two further residues the pass surfaced and this entry records rather than fixes: `veda_domain_nameable`
+has **exactly one call site** in the whole model (`veda_ocl_insts.sail:1292`, SET_DOMAIN), so Populate
+never consults it and can write an `owner_domain` the model declares non-existent; and
+`veda_pcc_save_and_reset` never clears `veda_oda_tag`, so the Object Directory Authority survives a
+trap -- **pre-existing, neither caused nor worsened here**, and it belongs with R78.
+
 #### Directions, none chosen
 
 1. **Give the handler an identity.** A trap-vector *object* rather than an address, so trap entry
@@ -7017,3 +7137,81 @@ that dissolves on a nested trap is not a boundary. It attaches to Phase 2's tail
 **R11 (added after RTL-6) attaches to Phase 2's tail** and blocks calling DESIGN_02's paging work
 safe: half (a) is built in Sail and owes an RTL mirror, half (b) is the next increment, and its
 multi-hart half joins the Phase 6 checklist beside R10's.
+
+### R79. The ambient root has THREE occupants and only one of them is boot -- a privilege drop keeps the identity
+
+**Status: MEASURED AT SOURCE, THREE INDEPENDENT WAYS. OPEN. Found while building R77's fix, by an
+agent asked to price an obligation; verified by me before being recorded, because the claim was
+larger than the question that produced it.**
+
+R77 asked who else stands where R75/R76 increment 1 concentrated authority, and answered "the trap
+handler". **That answer was incomplete.** The full enumeration is closed and it has three entries.
+
+#### The enumeration, closed rather than sampled
+
+`veda_pcc_object` has exactly **four writers** on each layer, and the layers agree arm for arm:
+`postlude/step_ext.sail:54` (reset), `veda_regs.sail:361` (trap entry), `:443` (xret restore),
+`veda_cap_insts.sail:625`/`:924` (OCInvoke/OCReturn) -- RTL twin `veda_core.tlv:6124-6133`. Only the
+last two install a **named** identity, and a capability naming the sentinel cannot cross either
+crossing anyway, because both check region-table residency first and the sentinel's region is outside
+the modeled window (`veda_core.tlv:5590-5595`). So the sentinel is reachable in exactly three states:
+
+| principal | how it gets there | privilege | intended? |
+|---|---|---|---|
+| boot | reset | Machine | **yes** -- R34 accepted this as architecture |
+| a trap handler | trap entry writes the sentinel | Machine | no -- **R77** |
+| **User code entered by a privilege drop** | never crossed anything | **User** | **no -- this finding** |
+
+#### The third row, verified at source three times
+
+1. **`mret` does not clear the identity at depth 0.** The entire body of `veda_pcc_restore_on_xret`
+   sits inside `if veda_trap_depth != zeros()` (`veda_regs.sail:420`). A boot-time privilege drop --
+   write `mstatus.MPP = User`, `mret` -- happens at depth 0, so the guard is false and
+   `veda_pcc_object` is never touched. It stays at the reset sentinel.
+2. **`veda.bind` has no privilege gate at all.** `grep -n cur_privilege veda_bind_insts.sail` returns
+   **nothing** -- not one occurrence in the whole file. The RTL twin `$veda_bind_domain_ok`
+   (`veda_core.tlv:2441-2443`) has no `$priv` term either.
+3. **Therefore arm 2 of `veda_bind_domain_ok` fires for User code**, and it is not hypothetical:
+   **6 of the 126 Sail suite files bind at User privilege with the sentinel identity**, and for
+   **five of them the proof is airtight because the file contains no crossing at all**:
+
+   ```
+   vc_r47_oda_scope_neg.S            crossings 0   binds 7
+   vc_r50_oclear.S                   crossings 0   binds 3
+   vc_r65_stale_base_authority_neg.S crossings 0   binds 2
+   vc_r68_populate_stale_base_neg.S  crossings 0   binds 2
+   vc_r69_pagein_machine_only_neg.S  crossings 0   binds 2
+   vc_r48_oda_inherit_neg.S          crossings 1   binds 9
+   ```
+
+#### Why this is worse than R77 and not merely parallel
+
+A trap handler is trusted code, and R77 said so plainly: what grew was the SIZE of that trust. **This
+row is not trusted code.** It is the ordinary shape of an operating system: a kernel sets
+`mstatus.MPP = User` and `mret`s into a process. Under this defect **that process holds the ambient
+root** -- it can `veda.bind` any object in the machine by name, having been delegated nothing. The
+entire object-ownership discipline this project has spent R52, R59, R73, R75 and R76 building is
+bypassed by any principal that arrives through the privilege ladder rather than through a compartment
+call.
+
+#### The diagnosis: identity comes from the CROSSING, and privilege is a different ladder
+
+Veda has two independent dimensions -- RISC-V privilege (Machine/User) and Veda identity
+(`veda_pcc_object`). The design has always taken identity from the compartment crossing. Nothing ever
+connected the privilege ladder to the identity ladder, so descending one leaves the other where it
+was. CHERIoT removed the ring dimension entirely (ISA v1.0 §7.9) precisely so this question cannot
+arise; CHERI-RISC-V keeps rings and answers it with §3.11.1 -- ambient authority *"constrained via
+capability permissions on the program-counter capability"*, enforced by §4.3.5 Table 4.2's whitelist.
+**Veda keeps the ring dimension and currently constrains nothing across it.**
+
+#### Candidate rule, NOT yet chosen and deliberately not built with R77
+
+> Ambient root is available only to a principal that is **both** nameless **and** in Machine mode.
+
+as one conjunct on arm 2: `veda_pcc_object == VEDA_OBJECT_NONE & cur_privilege == Machine`.
+It composes exactly with R77's fix -- under that fix a handler's identity is NOBODY rather than the
+sentinel, so the two close different rows of the table with no interaction. Measured cost: the six
+files above. **Not chosen here**, because this register holds four designs refuted for being chosen
+before they were priced, and because the honest question underneath is whether **descending the
+privilege ladder should also drop identity to nobody** -- which is a larger statement about what a
+Veda process IS, and belongs to the principal-granularity decision that is already open.
