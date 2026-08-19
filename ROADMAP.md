@@ -295,7 +295,7 @@ Two findings rejected on verification (recorded so they are not re-raised): ODT-
 already isolated from base-ISA stores by construction; TCM static placement already covers the
 same-hart cross-compartment case (no flush needed).
 
-## Hardening found by BUILDING it -- R10..R43, and why this section exists
+## Hardening found by BUILDING it -- R10..R71, and why this section exists
 
 **The section above records the 2026-08-11 red-team pass, which reasoned over DESIGN_00-06 and
 produced R1..R9 plus Rev-A..Rev-F. It is intact and still correct. It is also only a third of the
@@ -307,7 +307,7 @@ which is the argument for keeping the Sail model and the RTL as two independentl
 a differential harness between them.
 
 **All seventy live in `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which now runs
-R1..R70 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
+R1..R71 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
 R18, R25, R27, R28 -- and **three of them were shipped, verified hardware fixes**, two of exploitable
 class, invisible because they had landed under a parallel `RTL-n` numbering or been co-committed under
 another finding's heading. They are entered now.
@@ -351,9 +351,32 @@ mechanism, and R64 records the reopening condition and the three residuals rathe
 gap silent. Phase 2's stated
 gate -- "Sail residency/COW corpus (positive + negative + mutation), then RTL mirror" -- is met.
 
+**The compartment crossing is now closed on all three of its channels** (DESIGN_07 R48, R50
+increment 1, R71). R50 had measured that the capability register file crosses a compartment boundary
+**intact**: OCInvoke's only capability write is the IDC, OCReturn writes none, so a callee needed no
+authority at all -- it used a register the caller left bound. The crossing now **clears the
+capability register file by default**, governed by **CSR `0x7CA` `veda_xretain`**: bit `i` set means
+capability register `i` survives, and a CSR that was never written is zero, so **silence means clear
+and can never leak**. The mask is **self-consuming**, so delegation costs two instructions and costs
+them *inside the compartment that is delegating* -- which is where the decision belongs.
+
+The ABI that landed is **not** the one R50 increment 2 decided. That design sourced the mask from a
+general-purpose register named by a reserved-zero instruction field, and it was **refuted at the RTL
+on a fact the Sail layer is structurally incapable of showing**: OCInvoke's two operand fields both
+name capability registers, so a GPR-sourced mask means a **third integer read port on the whole
+register file**, paid by every instruction to serve two. Free in a specification, expensive in
+silicon. Increment 2's entry is kept verbatim beside R71 rather than rewritten -- it is the record of
+a decision that was right on the evidence available and wrong on evidence only the other layer had,
+which is the two-layer discipline earning its cost.
+
+**What this does NOT close**, stated here rather than discovered later: the dereference checker still
+asks **no domain question**. A capability a callee legitimately receives in the retain mask remains
+usable by anyone who later obtains that register by any means -- possession and authority are still
+the same thing on the dereference path, and that is now the largest single open item on the crossing.
+
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
-cross-layer differential suite. As of 2026-08-19: **120/120, 109/109, 51/51, 25/25**, and it now ends
+cross-layer differential suite. As of 2026-08-19: **121/121, 110/110, 51/51, 25/25**, and it now ends
 with an explicit verdict line.
 
 **Read that command's history before trusting any earlier number.** Until R46 it **could not fail**:

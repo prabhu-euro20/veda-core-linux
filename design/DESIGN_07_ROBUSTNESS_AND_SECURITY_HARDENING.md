@@ -2128,6 +2128,13 @@ and 0x7C8 are READ-ONLY in the model** -- their `is_CSR_accessible` clauses carr
 `write_CSR` clause exists for them. This layer had no write path and simply ignored the attempt;
 it now refuses it.
 
+> **Kept as written, corrected here (2026-08-19).** The enumeration above is the list **as it stood
+> when R32 shipped**. Two CSRs have been allocated since -- **0x7C9 `veda_mfaultobj`** (R64, read-only)
+> and **0x7CA `veda_xretain`** (R71, read-write) -- and both were added to `$csr_addr_known` with the
+> fix that introduced them, `0x7C9` also to `$csr_is_readonly`. Extracted from `veda_core.tlv` rather
+> than recalled, the decode list is now **seventeen** addresses: `0x300`, `0x305`, `0x340`-`0x343`,
+> `0x7C0`-`0x7CA`. The mechanism R32 shipped is unchanged; only its inventory moved.
+
 Verified by `p7_csr_space` flipping to AGREE, and by a mutant that forces `$veda_csr_undef` to zero
 and is killed.
 
@@ -4046,9 +4053,14 @@ confidentiality.
 
 ### R50 increment 2 -- THE ABI IS NOW DECIDED AND THE COST IS MEASURED. NOT LANDED.
 
-**Status: DESIGNED, PROTOTYPED IN SAIL, COST MEASURED, THEN REVERTED DELIBERATELY. The tree is green
-at Sail 118/118. This entry exists so the next pass starts from a settled ABI and a real number
-rather than an estimate.**
+**Status: SUPERSEDED BY R71 -- LANDED ON BOTH LAYERS, but with a DIFFERENT ABI. The GPR-sourced mask
+decided below was refuted at the RTL for a reason no Sail prototype could surface (see R71). This
+entry is kept verbatim, not rewritten: it is the record of a decision that was correct on the
+evidence available and wrong on evidence that only the other layer had.**
+
+**Original status: DESIGNED, PROTOTYPED IN SAIL, COST MEASURED, THEN REVERTED DELIBERATELY. The tree
+is green at Sail 118/118. This entry exists so the next pass starts from a settled ABI and a real
+number rather than an estimate.**
 
 #### The ABI, decided
 
@@ -5722,6 +5734,133 @@ core has no trap to return from"* and Milestone 9 built the traps twenty-seven m
 anyone re-read the sentence. Here the sentence was a **decision** rather than an observation, which
 makes it worse: repairing only the six comments would have left the reachable half-extension in
 place, and that is the test that separates a finding from documentation rot.
+
+### R71. The crossing now clears the capability register file -- and the ABI that got there is not the ABI that was decided
+
+**Status: MEASURED, FIXED AND VERIFIED ON BOTH LAYERS. Sail 121/121, RTL 110/110, ACT4 51/51,
+differential 25/25. This closes R50's possession channel, which had been open since R50 was first
+recorded, and it closes the last of the three channels a compartment crossing leaves behind
+(R48 mint, R50i1 tooling, R50i2 possession).**
+
+#### What was still open
+
+R50 measured it and named it precisely: OCInvoke's only capability write is the IDC, OCReturn writes
+none, and the dereference checker has **zero** domain terms. So a callee needs no authority at all --
+it uses a register the caller left bound. R48 closed the **mint** channel; increment 1 (OCLEAR) built
+the **tool** and, in doing so, recorded that until then *nothing in the machine could clear a
+capability register.* Increment 2 decided the ABI and deliberately reverted rather than half-land it.
+
+#### The decided ABI was refuted -- by the RTL, on a fact Sail cannot express
+
+Increment 2 chose a **RETAIN mask sourced from a GPR named by a reserved-zero instruction field**,
+and verified the fields were available. That verification was correct. What it could not see is that
+**OCInvoke's two operand fields both name CAPABILITY registers.** In Sail that costs nothing: `X(r)`
+is a function call. In the RTL it is a **third integer read port on the whole register file**, paid
+by every instruction, to carry a mask consumed by two.
+
+The attempt was made and abandoned on that measurement, not on taste. **A field being architecturally
+available does not make it economically readable**, and only the implementation layer knows which.
+
+> This is the second time this project has had a Sail-side design refuted by an RTL cost that the
+> Sail layer is structurally incapable of showing. It is an argument for the two-layer discipline
+> itself, not an argument against Sail-first.
+
+#### The ABI that landed: CSR 0x7CA `veda_xretain`
+
+- **Retain, not clear.** Bit `i` set means capability register `i` **survives** the next crossing.
+  Never written means zero means retain **nothing** -- so **silence means clear, and silence can
+  never leak.** That was increment 2's central safety argument and it survives the ABI change intact.
+- **Read-write**, so a compartment can read back what it is about to spend.
+- **SELF-CONSUMING.** The crossing zeroes it. A mask cannot survive to apply to a later crossing.
+- **Cleared on trap entry**, and reset to zeros architecturally. A trap is not a crossing; leaving a
+  mask armed across one would let a handler's resumption spend authority the interrupted code
+  intended for somewhere else.
+- **Both placement rules from increment 2 are preserved unchanged**: OCInvoke clears **before** the
+  IDC install, so `c15` survives by construction and needs no mask bit; OCReturn **does not exempt**
+  `c15`, because it installs no IDC and a surviving one hands the callee's own data capability back
+  to the caller. The RTL twin asserts that second rule directly (`cgettag c15` must read 0 after the
+  return leg).
+
+A CSR rather than an instruction field also means the mask is **not** part of the crossing encoding,
+so the reserved-zero pins R30(b) placed on OCInvoke and OCReturn stay pinned.
+
+#### What self-consuming actually costs, measured rather than asserted
+
+It costs a **PCC window**. `vc_r58_domain_writers.S` broke, and the reason is the mechanism working
+as designed: a compartment that wants to pass capabilities onward must set the CSR **itself, from
+inside its own PCC window**, because the caller's mask was already spent getting it there. Its
+compartment window had to widen from `0x40` to `0x80` to hold two more instructions.
+
+That is the honest price. **Delegation is no longer free and no longer silent** -- it costs two
+instructions and it costs them *inside the compartment that is delegating*, which is exactly where
+the decision belongs.
+
+#### How much of the corpus was living off the leak
+
+| | files carrying a crossing | needed a retain mask | needed none |
+|---|---|---|---|
+| Sail | 44 | 15 (37 declarations) | 29 |
+| RTL | 30 | 29 (50 declarations) | 1 |
+
+The Sail row is the encouraging one: **29 of 44 files crossed a compartment boundary and never
+depended on anything surviving it.** Most were already using only the IDC the crossing installs.
+The RTL row is the opposite because its tests are integration-shaped and carry state across.
+
+**Every one of those 87 declarations is RETAIN ALL, and that makes all 87 vacuous with respect to
+this mechanism** -- delete the clear and every one still passes. That is stated here rather than
+discovered later, and it is why the discrimination is carried by exactly one dedicated file per
+layer (`vc_r50i2_crossing_clear.S`, `veda_smoke_r50i2_crossing_clear.S`), each running **two rounds**:
+
+- **Round 1** retains only the sentry. The callee's dereference of the caller's `c10` must trap.
+- **Round 2** retains the sentry **and** `c10`. The same dereference must now return `0xC0FFEE`.
+
+Round 2 is not decoration. **Without it, a core that simply wiped the whole file at every crossing --
+ignoring the mask entirely -- would pass round 1 for entirely the wrong reason.** That is the shape
+this project has now caught **twelve** times.
+
+#### The RTL vacuity proof, with the strip asserted before it was believed
+
+`assign L1_xclear_wr_en_a0` was replaced with `1'b0` in a copy of the generated Verilog. **The
+mutation was asserted to have landed before the run** -- 228 bytes removed, replacement text
+confirmed present -- because this project has already been fooled once by a strip that silently
+matched nothing and then "passed".
+
+On the mutant, with the clear disabled:
+
+```
+round 1 trap count            x20 = 0        (must be 1)
+round 1 value read            x22 = 0xC0FFEE (must be 0)  <-- the caller's secret
+callee IDC survived return    x25 = 1        (must be 0)
+round 2 value read            x24 = 0xC0FFEE (passes -- correctly, it is the over-refusal guard)
+```
+
+**That middle line is R50's possession channel executing on real hardware**: a compartment holding
+nothing but its own code and data capabilities read the caller's private object, with **zero traps**,
+and carried the callee's own IDC back across the return. On the fixed core the same instruction
+traps with `mtval = 0x142` -- `cap_idx = 10`, cause `0x02` TAG -- so the refusal **names the register
+it refused**, which is the difference between a refusal and a crash.
+
+#### A test-harness lesson worth more than the finding
+
+Inserting the two mask instructions into `veda_smoke_m10_neg.S` broke it, and the reason was not the
+mechanism. That file's handler compares `mepc` **exactly** against a label, and the insertion landed
+**between the label and the trapping instruction** -- so the label stopped naming the thing it was
+pinning. Every displaced label in the corpus was then found by script and each was **classified, not
+mass-edited**: two were genuine breaks (re-pinned onto the crossing), and four were jump or resume
+targets where having the mask write *inside* the label is not merely harmless but **required**, since
+a self-consuming mask must be re-armed on every entry.
+
+> **An inserted instruction can move a label off the instruction it was pinning.** A sweep that
+> "adds two lines before every crossing" is not a mechanical edit in a corpus where addresses are
+> assertions.
+
+#### Residual, carried forward unchanged from increment 2
+
+Clearing the registers closes **possession**. It still does **not** give the dereference checker a
+domain question -- `veda_pcc_object` and `veda_current_region` remain **zero** occurrences in the
+access-check file. A capability a callee legitimately receives in the retain mask is still usable by
+anyone who later obtains that register by any means. **Possession and authority remain the same thing
+on the dereference path**, and that is now the largest single open item on the crossing.
 
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
