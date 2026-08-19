@@ -5649,6 +5649,80 @@ delegate could hold -- so the refusal cannot be attributed to a narrow window. A
 must come back usable at the new frame. A rule that stranded data would be a bug, not a fix, and this
 test would catch it.
 
+### R70. DESIGN_01 decision 7 was recorded, cited six times, and never built
+
+**Status: MEASURED, FIXED AND VERIFIED. Sail 120/120, RTL 109/109, ACT4 51/51, differential 25/25.
+The second finding from the expired-justifications sweep, verified at source by me before acting.
+A fail-open CONFIGURATION gate, not a capability escape -- the severity is stated rather than
+inflated.**
+
+#### The decision, and the gap
+
+DESIGN_01 decision 7 says outright:
+
+> *"**Gate `Ext_Veda` on `xlen == 64`** (reverses the earlier xlen-generic decisions; drops NMC_ADD.W
+> on RV32) ... This is a **prerequisite that lands before any width edit**."*
+
+**The width edit landed. The gate did not.** And **six comments** across the extension cite that
+decision as settled fact -- three of them adding *"but that gate is invisible to the type checker
+here"*, which is the tell: the author knew it was not structural and assumed it existed elsewhere.
+
+#### Measured before the fix
+
+- `currentlyEnabled(Ext_Veda) = hartSupports(Ext_Veda)` -- **no xlen term.**
+- Of **28** `mapping clause encdec = VEDA_*` clauses, **12 carry `xlen == 64` and 16 do not.**
+- `postlude/validate_config.sail` contains **zero** occurrences of "Veda".
+- `sail_riscv_sim --rv32 --validate-config` reported **"The default configuration is valid."**
+
+So an RV32 build ran an **incoherent half-extension nobody specified**: the capability-query,
+derivation and sealing family, the three domain crossings, Destroy, OCLEAR and `veda.bind` decoded,
+while OCL/OCS, the ODT write path, the paging pair and the atomics did not.
+
+**It is not a capability escape.** Every bounds and permission check lives on the dereference path,
+and that is exactly the half that did not decode.
+
+#### The fix, at three levels, and why all three
+
+1. **Structural** -- `currentlyEnabled(Ext_Veda) = hartSupports(Ext_Veda) & (xlen == 64)`. **One line
+   closes all twenty-eight**, because every clause guards on it -- verified by counting before
+   landing. The twelve that also carry `xlen == 64` become redundant rather than wrong and are left
+   alone: they document the same fact at the site that needs it.
+2. **Declarative** -- the generated config now says `"supported": false` at xlen 32, so the
+   configuration states the truth instead of claiming support the model then has to refuse.
+3. **Loud** -- a `validate_config` arm mirroring the existing Zcf one, so a **hand-written** config
+   that claims Veda on RV32 is refused with a message rather than silently producing a Veda-less
+   core. That is R14's rule -- refusals must be visible -- applied one layer up.
+
+Level 1 alone would have been fail-safe but silent. Level 2 alone could be overridden by hand.
+Level 3 alone would not stop anything.
+
+#### Measured after the fix
+
+```
+generated rv32 config          ->  Veda.supported = false
+generated rv64 config          ->  Veda.supported = true      (unchanged)
+hand-written rv32 claiming Veda ->  "The configuration is invalid.
+                                    The Veda extension is enabled: Ext_Veda is RV64-only."
+CGetObjectID executed on rv32   ->  illegal 0xe00055b
+```
+
+That last line is the finding closing: before the fix that encoding decoded and wrote `rd`.
+
+#### No RTL mirror, and that is verified rather than assumed
+
+`veda_core.tlv` contains **three** occurrences of `rv32`/`xlen`, and all three are **comments** --
+there is no xlen parameter and no 32-bit datapath. The RTL is RV64 by construction, so there is
+genuinely nothing to mirror.
+
+#### The class this belongs to
+
+A justification that was **true when written and false when relied on** -- the class the sweep that
+found it was hunting, and the same shape as R36, where a custom instruction was justified by *"this
+core has no trap to return from"* and Milestone 9 built the traps twenty-seven milestones before
+anyone re-read the sentence. Here the sentence was a **decision** rather than an observation, which
+makes it worse: repairing only the six comments would have left the reachable half-extension in
+place, and that is the test that separates a finding from documentation rot.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
