@@ -5948,6 +5948,68 @@ gate: the container's ODT entry is already looked up by `veda_check_access`, but
 is not, and a second ODT lookup in the same instruction is exactly the class of cost that refuted
 R50 increment 2's ABI. **That cost is being priced before the mechanism is chosen, not after.**
 
+### R72 FORM 2 -- the copy-on-write split entitlement is a bearer token, and it needs no domain narrowing at all
+
+**Status: MEASURED ON BOTH LAYERS WITH IDENTICAL VALUES. OPEN, mechanism being priced. This is the
+half of R72 that bites in the DEFAULT configuration, and it is a hole in Phase 2's own machinery.**
+
+#### R38 wrote the rule down and then defended it against two attacks out of three
+
+R38 chose `PERM_STORE`-carried-in-a-capability as the token for *may force the copy-on-write split*,
+and stated the rule at `veda_ocl_insts.sail:127`:
+
+> *"WHOEVER HELD WRITE AUTHORITY AT THE MOMENT THE OBJECT BECAME COPY-ON-WRITE MAY CAUSE THE SPLIT ...
+> the copy is owed to the writers that existed at fork, not to anyone who later learns the NAME."*
+
+It defended that against **re-Bind** -- `veda_bind_perms` masks a cow entry's `Perms` with `0xFFF7`,
+so a fresh bind cannot carry `PERM_STORE`, and the model calls that the one attenuation a re-derivation
+cannot escape -- and against **CAndPerm**. **It never considered TRANSFER.**
+
+#### Three facts, each verified at source, that make the token portable
+
+1. `veda_ocl_insts.sail:256` -- `else if need_store & entry.cow then Err(... VEDA_CAUSE_COW_FAULT)`.
+   **`0x0C` is not a refusal.** R38's own text calls it a **repair request**: it instructs a handler to
+   allocate, copy, and hand back a fresh writable object. Forcing it is an **allocation on someone
+   else's behalf**, repeatable.
+2. `veda_ocl_insts.sail:1321` -- `set.cow` does **not** bump the generation, and the comment says why:
+   *"that is the entire purpose of this."* So a capability minted **before** the object became
+   copy-on-write stays live, and keeps `PERM_STORE`.
+3. `VEDA_OCS_C` and `VEDA_OCL_C` move that capability through memory, and `veda_check_access` has
+   **eleven arms and zero domain terms**.
+
+#### Measured, with a control, and the discriminator is the cause code
+
+`poc_r72f2_cow_entitlement.S`, Sail and RTL **identical**:
+
+```
+CONTROL   B binds the victim BY NAME        ->  cgettag 0, ZERO traps
+                                                (no route: BOOT-owned since increment 1)
+TRANSFER  A binds it, set.cow, ocs.c into a shared object;  B does ocl.c
+          cgettag                            ->  1          B holds a TAGGED capability
+          ocs.d through it                   ->  mtval 0xEC = cap_idx 7, cause 0x0C COW_FAULT
+```
+
+**`0x0C` where `0x13` belongs is the whole finding.** A capability B could mint for itself carries no
+`PERM_STORE`, so a store through it would give `0x13` PERM_STORE -- a refusal. The **transferred** one
+carries `PERM_STORE`, reaches the cow arm, and gets the **repair request**. B, which held nothing when
+the object became copy-on-write, forces the split.
+
+#### Why this half is more urgent than Form 1
+
+**Form 2 needs no `set.domain`, no narrowed object, and no domain notion of any kind.** Form 1 -- the
+`owner_domain` bypass -- only bites once software narrows something, and its mechanism inherits the
+**open principal-granularity question** (the shipped switcher puts every object in region 0, so a
+region-keyed rule is inert there). Form 2 bites in the configuration the machine ships in, and a
+mechanism for it that needs a sound domain notion is therefore **the wrong shape**.
+
+#### The sentence R38(b) already wrote, about the wrong fragility
+
+`veda_ocl_insts.sail:1399-1401` records: *"The entitlement should survive paging, which means it must
+live in the ENTRY rather than in the capabilities."* R38(b) reached that conclusion by finding that
+**paging destroys** the split right. The same sentence, for the opposite reason, is now a candidate
+answer to this: an entitlement in the entry is one that cannot be posted through memory either.
+**Whether that is the right fix or merely the nearest one is exactly what is being priced.**
+
 ### R73. A domain refusal trapped for all three bind modes, and nothing anywhere said why
 
 **Status: MEASURED ON BOTH LAYERS BEFORE CHANGING ANYTHING, FIXED AND VERIFIED. Sail 122/122,
