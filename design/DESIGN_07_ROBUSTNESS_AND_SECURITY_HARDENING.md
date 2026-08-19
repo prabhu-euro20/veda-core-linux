@@ -7748,8 +7748,34 @@ That is not an argument against it; it is the measurement that says step 1 must 
 
 ### R84. A capability cannot reach a device, so a purecap machine has no I/O -- and this is why R83's first increment could not be built
 
-**Status: MEASURED BY BUILDING R83 STEP 1 AND WATCHING IT FAIL IN EXACTLY ONE PLACE. OPEN. The fix is
-upstream machinery this fork already has and does not use.**
+**Status: DATA FAMILY CLOSED IN SAIL AND PROVED LOAD-BEARING. Sail 130/130, RTL 112/112, ACT4 51/51,
+differential 28/28, `verification.sh` exit 0. Capability family and the RTL device model remain OPEN.**
+
+**LANDED:** `VEDA_OCL` and `VEDA_OCS` now route through `mem_read_priv_meta` /
+`mem_write_value_priv_meta` -- the upstream checked path, already tag-carrying and already MMIO-aware.
+`sail_tests/poc_r84_purecap_has_no_io.S` was promoted to **`vc_r84_capability_io.S`** with its body
+**unchanged**: the only thing that differs between *cannot pass* and *passes* is the memory path.
+
+**Load-bearing proof:** revert the two sites to `read_ram`/`write_ram` and `vc_r84_capability_io` fails,
+129/130. Restore them and it passes, 130/130.
+
+**Four risks were checked at source BEFORE the edit, not after** -- and the second would have broken
+every User-mode capability access in the corpus:
+
+| risk | resolution |
+|---|---|
+| the checked path runs `pmpCheck`, which with no PMP entries denies **U-mode everything** | `if sys_pmp_count == 0 then return None()` (`pmp/pmp_control.sail:120`), and this project's config sets `"count": 0` |
+| the purecap hook `ext_data_get_addr` might fire on Veda's own accesses | it is called **only** from `sys/vmem_utils.sail:282`, inside the **virtual** path; `mem_*_priv_meta` takes a physical address and never reaches it, so `step_ext.sail`'s claim that the hook is unreachable from a legitimate Veda access **remains true** |
+| `vmem_read` looks like the obvious call | it must **not** be used: it translates, splits pages and handles misalignment, none of which Veda may do -- `veda_check_access` already produced a physical address from the object's own bounds |
+| widths | the type checker refuses `Virtaddr(a)` because it must prove `(if xlen == 32 then 34 else 64) == xlen` for **all** `xlen`; R70's RV64-only gate is a runtime condition it cannot see. `veda_to_xlen(zero_extend(a))` is this file's own conversion (`veda_types.sail:185`) and is exact on RV64 |
+
+**Still open, deliberately:** the capability family (`OCL.C`/`OCS.C`) under DECISION 2 below, the NMC and
+Veda-Atomic families (unpriced), and **the RTL's total absence of a device model**, which Phase 3's timer
+will need. The finding below is kept in full because the reasoning is what made the fix mechanical.
+
+---
+
+**How it was found: BY BUILDING R83 STEP 1 AND WATCHING IT FAIL IN EXACTLY ONE PLACE.**
 
 R83's first increment was a purecap-safe halt: signal completion through a bound `tohost` object with
 `OCS.D` instead of the two ordinary `sw` stores, so that a test could finally run its whole steady state
