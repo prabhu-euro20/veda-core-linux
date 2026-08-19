@@ -441,9 +441,17 @@ the same shape: a compartment binding an object the ambient context created. Tha
 measured rather than argued -- R17 was retracted for *forbidding* cross-domain Bind; this does not
 forbid it, it requires that it be **declared**, which is what a loader does at load time anyway.
 
-It was **reverted clean rather than half-landed**: a Sail-only landing would make the two layers
-disagree about who may bind an object, which this project has twice recorded as worse than the hole.
-What the next pass owes is execution, not design.
+**IT IS NOW LANDED ON BOTH LAYERS.** Sail 126/126, RTL 112/112, ACT4 51/51, differential 25/25, and
+the three probes that measured the escalations are `vc_` negative tests inside the suite rather than
+proofs-of-concept beside it. Both edits were proved separately load-bearing by neutering each in
+turn: take away the ambient default and the two forge chains come back while the re-stamp stays
+closed; take away the ownership term and the re-stamp comes back while the forges stay closed.
+
+The landing cost eleven declarations across eight Sail tests and seven across six RTL tests, and not
+one line of the mechanism changed between the prototype and the landing. Two of those declarations
+were found only by RUNNING the tests -- the second thread's code object in each scheduler file, which
+a lexical scan misses because one resume is reached by a jump rather than by falling through the
+crossing.
 
 **What is still genuinely undecided**: the shipped switcher puts every object in one region, so any
 region-keyed rule is inert there -- thread and scheduler are the same principal by construction. The
@@ -452,7 +460,7 @@ granularity question -- is a principal a region, or an object? -- is open and is
 
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
-cross-layer differential suite. As of 2026-08-19: **123/123, 112/112, 51/51, 25/25**, and it now ends
+cross-layer differential suite. As of 2026-08-19: **126/126, 112/112, 51/51, 25/25**, and it now ends
 with an explicit verdict line.
 
 **Read that command's history before trusting any earlier number.** Until R46 it **could not fail**:

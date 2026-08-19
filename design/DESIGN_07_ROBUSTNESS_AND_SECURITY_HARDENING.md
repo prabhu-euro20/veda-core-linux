@@ -6394,7 +6394,30 @@ and what CHERIoT's loader does when it splits root capabilities into software ro
 depends on R75's, and **the two must land as one increment**. Landing R76 alone would produce exactly
 the shape this register keeps recording: a gate whose input the attacker controls.
 
-### R75 + R76 increment 1 -- THE MECHANISM IS DECIDED AND THE COST IS MEASURED. NOT LANDED.
+### R75 + R76 increment 1 -- LANDED ON BOTH LAYERS
+
+**Status: BUILT, MIRRORED AND VERIFIED. Sail 126/126, RTL 112/112, ACT4 51/51, differential 25/25.
+All three measured escalations are CLOSED on both layers, and the three probes that measured them are
+now `vc_` NEGATIVE tests in the suite. Both edits were proved separately load-bearing: neuter the
+ambient default and R75 + R75b fail while R76 still passes; neuter the ownership term and R76 fails
+while R75 still passes. The paragraphs below are the original NOT-LANDED entry, kept because the
+measurement in them is what made the landing possible.**
+
+#### What the landing actually cost, measured rather than estimated
+
+Eleven declarations across eight Sail tests, seven across six RTL tests, and not one line of the
+mechanism changed between prototype and landing. The re-aiming split three ways, exactly as the
+earlier attempt predicted: mechanical for most, a deliberate `VEDA_DOMAIN_ANY` declaration for the
+three files whose controls ARE R17's return path, and one file -- `veda_smoke_r11b_pin.S` -- that
+needed a declaration its Sail twin did not, because the twin's equivalent re-Bind runs from a trap
+handler where `veda_pcc_object` is `VEDA_OBJECT_NONE` and the ambient arm already passes. **The two
+files differ in structure, not in the rule they exercise**, and that was checked rather than assumed.
+
+Two objects were found only by RUNNING the tests, never by reading them: the second thread's code
+object in each scheduler file. A lexical scan sees one resume and not the other, because the first is
+reached by a jump rather than by falling through the crossing.
+
+### (original entry, kept) THE MECHANISM IS DECIDED AND THE COST IS MEASURED. NOT LANDED.
 
 **Status: PROTOTYPED IN SAIL, ALL THREE MEASURED ESCALATIONS VERIFIED CLOSED, COST MEASURED, THEN
 REVERTED DELIBERATELY. The tree is back at 123/123 and the three probes are open again. This entry
