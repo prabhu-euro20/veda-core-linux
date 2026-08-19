@@ -4042,6 +4042,73 @@ clear registers, or every cross-compartment call becomes a trap to Machine. It n
 increment, and it should come before any claim that this architecture provides compartment
 confidentiality.
 
+---
+
+### R50 increment 2 -- THE ABI IS NOW DECIDED AND THE COST IS MEASURED. NOT LANDED.
+
+**Status: DESIGNED, PROTOTYPED IN SAIL, COST MEASURED, THEN REVERTED DELIBERATELY. The tree is green
+at Sail 118/118. This entry exists so the next pass starts from a settled ABI and a real number
+rather than an estimate.**
+
+#### The ABI, decided
+
+The crossing takes a **RETAIN mask** from a GPR named by a field that is reserved-zero today. Bit `i`
+set means capability register `i` **survives**; everything else is cleared.
+
+**Retain rather than clear, and that choice is the entire safety argument.** A reserved-zero field
+decodes to `x0`, `X(x0)` is zero, and a zero mask retains **nothing** -- so R30(b)'s existing
+reserved-zero pin becomes the fail-safe default *for free*. Every crossing written before the
+increment clears everything, and a caller that wants to pass capability arguments must say so. The
+opposite convention would have made silence mean **leak**.
+
+The mask is sourced from a GPR **exactly as `VEDA_OCLEAR` sources its mask** (increment 1), so the
+machine ends with one mask convention rather than two.
+
+#### The encoding, verified available rather than recalled
+
+- **OCInvoke's `rd`** is `0b0 @ 0b0000` -- five reserved-zero bits. `p8_reserved_bits.S` pins
+  OCInvoke's **bit 24** (the top bit of the `rs2` field), not `rd`. **Available.**
+- **OCReturn's `rs2`** is `0b00000` -- five reserved-zero bits. `p8_reserved_bits.S` pins OCReturn's
+  **`rd`**, not `rs2`. **Available.**
+
+#### Two placement rules that fall out of the mechanism
+
+- **OCInvoke clears BEFORE the IDC install**, so `c15` survives by construction and needs no special
+  case in the mask.
+- **OCReturn does NOT exempt `c15`.** It installs no IDC, so a surviving one hands the callee's own
+  data capability back to the caller.
+
+#### The measured cost
+
+Prototyped in Sail and run against the corpus: **15 of 118 self-check tests fail** --
+`vc_ocinvoke`, `vc_ocreturn_basic`, `vc_pcc_bounds`, `vc_ocjalr_compartment_boundary_neg`,
+`vc_d5_crbr_shadow_leak`, `vc_r11b_executing_pin_neg`, `vc_r52_creation_domain`,
+`vc_r58_domain_writers`, `vc_r67_frame_owner_neg`, `vc_scheduler_cooperative_yield`,
+`vc_ssc_cross_thread_isolation`, `vc_ssc_spill_reload`, `vc_switcher_register_clear`,
+`vc_switcher_register_clear_fast_return`, `vc_syscall0_step0_spike`.
+
+That is not breakage -- it is **the corpus declaring, one file at a time, what it had been passing
+across a boundary without saying so.** Each re-aiming is a design statement, not a mechanical edit.
+
+#### Why it was reverted rather than half-landed
+
+Completing it means: 15 Sail tests re-aimed, the RTL encoding changed and its clear logic added, the
+RTL twins re-aimed, the differential probes checked against two changed encodings, and the shipped
+switcher's four crossings given masks. **A Sail-only landing is exactly the "half a fix is worse than
+none" state R67 recorded one increment earlier** -- there the RTL would have held a depth while
+releasing a frame, a state neither layer models. The same trap, one layer up.
+
+So: reverted clean, tree green, ABI settled, cost known. What the next pass owes is execution, not
+design.
+
+#### Residual that this does NOT close, stated now so it is not discovered later
+
+Clearing the registers closes the **possession** channel. It does **not** give the dereference
+checker a domain question -- `veda_pcc_object` and `veda_current_region` still appear **zero** times
+in the access-check file. A capability that a callee legitimately receives in the retain mask is
+still usable by anyone who later obtains that register by any means. Possession and authority remain
+the same thing on the dereference path.
+
 ### R51. The region table has no software write path, so the compartment crossing has never been differentially tested
 
 **Status: MEASURED, RECORDED. Not fixed -- the fix is a new instruction, and it should be designed,
