@@ -7619,3 +7619,108 @@ Two things this entry does NOT claim, stated so the severity is not overread: a 
 install its own handler (`mtvec`'s write is gated by the same predicate, and R80 made it Direct-only),
 and boot legitimately configures `veda_mode` -- R34 accepted the ambient boot context as architecture.
 **What is new is that the trap handler inherits boot's reach over the enforcement itself.**
+
+### R83. Purecap is the only thing standing between an ambient principal and all of memory -- it is OFF by default, and Veda's own shipped software cannot run with it ON
+
+**Status: MEASURED, WITH THE CONTROL THAT BOUNDS THE CLAIM. OPEN, AND IT RE-SEQUENCES THE WHOLE R77
+LINE OF WORK. Found by continuing to attack R82 instead of recording it and moving on.**
+
+R82 said a trap handler can execute `csrw 0x7c5, 0` and then read anything. **The `csrw` is not the
+escalation. It is a fallback for the case where somebody had turned purecap on.** Re-run the same probe
+with purecap left at its reset value and the handler touching no CSR at all:
+
+```
+  0x7C5 at its RESET DEFAULT                        0        purecap is OFF
+  traps after an ordinary ld at boot                0
+  what that boot-side ld loaded              0xC0FFEE
+  what the HANDLER read, touching NO CSR     0xC0FFEE   <-- no csrw, no capability, no trap
+```
+
+#### What IS protected, stated first so the claim is not overread
+
+`ext_data_get_addr` (`postlude/step_ext.sail:169-176`) has **two** refusal arms, and the second one is
+**unconditional on purecap**:
+
+```
+if veda_mode[0..0] == 0b1              then Err(PURECAP)     <- the global switch, off at reset
+else if veda_pcc_length != VEDA_PCC_UNBOUNDED then Err(PURECAP)  <- ALWAYS ON for a bounded PCC
+else OK
+```
+
+So **a compartment entered by OCInvoke is genuinely protected** -- its PCC is narrowed, so ordinary
+loads and stores are refused whether purecap is set or not. The model's own comment says exactly why
+that arm exists: *"compartmentalized code could still issue an ordinary LOAD/STORE to read/write memory
+anywhere -- undermining the isolation OCInvoke/PCC-bounding is meant to provide. Reusing
+`veda_pcc_length` here (rather than a second, independent bounds check) closes this for free."*
+
+**The exposure is precisely the UNBOUNDED principals**, and R79 already enumerated them and proved the
+enumeration closed: **boot** (Machine, intended, R34 accepted it) and **every trap handler**.
+
+#### The part that is new, and it is a statement about the whole architecture
+
+**Veda's shipped software cannot run with purecap on.** Counted by instruction match, not by eye:
+
+| file | ordinary loads/stores |
+|---|---|
+| `runtime/veda_sched_asm.S` -- the switcher, and it IS `mtvec` in the scheduler tests | **13** |
+| `runtime/veda_rt_trap_catcher.S` | 3 |
+| `runtime/veda_rt_asm.S` | 1 |
+| `runtime/crt0.S` | 1 |
+| `rtl/sim/veda_smoke_syscall0_kernel.S` -- the OS kernel syscall handler | 4 |
+
+**And no test in the corpus can even END with purecap on**, because `RVMODEL_HALT_PASS` in
+`sail_tests/veda_selfcheck_macros.S` signals completion with two ordinary `sw` stores to `tohost`.
+Measured across the 12 files that touch `0x7C5`: **8 enable purecap and then disable it again**, and
+`vc_purecap_store_neg.S:27-31` says why in its own words -- *"clear veda_purecap before
+RVMODEL_HALT_PASS/FAIL's own ordinary `sw` runs, or it too traps."*
+
+> **So purecap is enforced by the machine and enabled by nothing.** It is off at reset
+> (`postlude/step_ext.sail:74`, *"explicit zero (veda_purecap off by default)"*), every piece of real
+> software this project ships would fault on its first spill if it were on, and every test that turns it
+> on turns it off again a few instructions later. **Its steady state has never been executed.**
+
+#### Why this re-sequences R77, R82 and everything after them
+
+R77 set out to bound a trap handler by giving the trap vector an identity. R82 found that the handler
+can switch the enforcement off. **R83 is the reason both were aiming past the target:**
+
+> **The handler does not need to defeat purecap, because purecap is not on.** Every escalation R77 and
+> R82 measured -- binding an undelegated object, aliasing through Populate, flipping `0x7C5` -- is a
+> longer road to a place an ordinary `ld` already reaches.
+
+This does **not** retract R79, R80 or R81. Those closed real, independent defects on the paths that
+*are* governed -- the bind gate, the WARL trap vector, the ODA's scope -- and they hold for compartments
+whether purecap is on or off. What it retracts is the **priority** of naming the trap vector.
+
+#### DECIDED: the next increment is to make the runtime purecap-native, and nothing on the trap-vector line lands before it
+
+**Reasoning, stated because this reverses my own stated next step twice over.** A mechanism is worth
+building when the property it protects is reachable. Purecap's property -- *"you cannot touch memory
+without a capability"* -- is the foundation every other Veda mechanism assumes. Until the switcher, the
+trap catcher, the runtime and the kernel can run with `veda_mode` set, that foundation is a claim about
+a configuration nothing runs in, and hardening the trap vector is hardening a door in a wall that has no
+other bricks.
+
+**Concretely, and in this order:**
+
+1. **Make the halt path purecap-safe**, or the mechanism cannot even be tested end to end -- a
+   `RVMODEL_HALT_PASS` variant that signals through a bound `tohost` object with `OCS.D` rather than
+   `sw`. Without this no test can leave purecap on, and *that* is why its steady state is unexercised.
+2. **Convert `runtime/veda_sched_asm.S`'s 13 sites** to capability accesses, then the trap catcher, the
+   runtime and the kernel. This is the first time in this project that a security mechanism's cost lands
+   on the SOFTWARE rather than the model, and that cost is the honest measure of whether the mechanism
+   is real.
+3. **Only then** revisit whether purecap should be sticky. RISC-V has a ratified precedent for exactly
+   that shape -- **Smepmp**, whose own motivation is this threat in the standard's words: *"an attacker
+   instead of tampering with code and/or data that belong to a high-privileged process, can tamper with
+   the memory of an unprivileged / less-privileged process and trick the high-privileged process to use
+   or execute it"*, noting that *"Machine mode has unlimited access, including the ability to execute
+   it"*, and that the danger is sharpest where *"the whole OS will run on Machine mode instead of the
+   non-existent Supervisor mode"* -- **which is exactly Veda's Machine+User configuration**. Its
+   mechanism is a one-way bit: *"all fields defined in `mseccfg` as part of this extension are locked
+   when set (`MMWP`/`MML`)"*, cleared only by a *"PMP reset ... re-initialized to a set of safe
+   defaults"*. **Sticky purecap is that shape**, and it is refused here only because it cannot be priced
+   until step 2 tells us what running under purecap actually costs.
+
+**Measured cost of step 3 if taken today: 8 of the 12 tests that touch `0x7C5` would be unable to halt.**
+That is not an argument against it; it is the measurement that says step 1 must come first.
