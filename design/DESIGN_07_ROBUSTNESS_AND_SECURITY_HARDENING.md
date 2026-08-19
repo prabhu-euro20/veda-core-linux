@@ -6326,6 +6326,74 @@ thread code objects by name at `runtime/veda_sched_asm.S:296` and `:307` and min
 at `:331` -- so the two cannot be told apart by instruction, only by authority the machine does not
 currently represent.
 
+### R76. The policy field the whole domain model rests on has no ownership gate
+
+**Status: MEASURED ON BOTH PRIVILEGE ARMS. OPEN. Severity stated rather than inflated: this is a
+MACHINE-MODE escalation, and User was measured genuinely refused. Within Machine it defeats the
+entire domain model in ONE instruction, with none of R75's forging. Found by a security lens that
+went looking for who may WRITE the field two of the four R75 designs staked everything on -- and
+neither of those authors had checked.**
+
+#### The complete authorisation, read at source
+
+`VEDA_ODT_SET_DOMAIN` (`veda_ocl_insts.sail:1251-1252`):
+
+```
+if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+```
+
+**Nowhere in the sixty-line clause is the actor's own domain compared to the entry's
+`owner_domain`.** Verified by scanning the whole clause for `veda_pcc_object`, `owner_domain`,
+`veda_bind_domain_ok` and `veda_creating_domain`: the only two hits are a comment and the write
+itself.
+
+So the field that says **who may bind an object** can be re-stamped by an actor that does not own it.
+R75 forges an identity to satisfy the gate; **R76 does not bother -- it rewrites the gate's own
+input.**
+
+#### Measured, with a control, and with both privilege arms
+
+```
+CONTROL, region-1 compartment    veda.bind.notrap SECRET  ->  cgettag 0    refused
+ARM 1, at Machine                veda.odt.set.domain SECRET <- 1  ->  ALLOWED, zero traps
+                                 veda.bind.notrap SECRET  ->  cgettag 1    SUCCEEDED
+                                 ocl.d                    ->  0xC0FFEE
+ARM 2, at User, same instruction ->  TRAPPED, exactly once
+```
+
+Arm 2 is not decoration. *"It needs Machine"* is only a mitigation if User is genuinely refused, and
+this file measures that rather than asserting it.
+
+#### Why R47's window is not this gate
+
+R47 gave the policy write an ODA window, and its comment says *"a policy write is authority over the
+descriptor, and so it needs authority over the memory that descriptor names."* That is authority over
+**memory**. It is not authority over **policy**. A delegate handed an ODA covering a window may
+re-stamp the ownership of every object in it, including objects belonging to other domains that
+happen to live there -- and R45 already recorded that two Object_IDs may name the same memory.
+
+#### What it does to the mechanism choice for R72 and R75
+
+Every candidate mechanism for either finding that keys on `owner_domain` -- and that is most of them
+-- inherits this. A rule is only as sound as the field it reads, and this field is writable by
+someone who does not own it.
+
+#### The fix direction, and why it cannot land alone
+
+The natural rule is **you may re-stamp only what you already own**:
+
+```
+owner_domain == <the actor's domain>
+```
+
+with the ambient boot context (`veda_pcc_object == VEDA_OBJECT_NONE`) as the one exempt principal, so
+that boot can perform the initial delegation -- which is what CHERI's model does with its reset root
+and what CHERIoT's loader does when it splits root capabilities into software roots.
+
+**But "the actor's domain" IS `veda_pcc_object`, and R75 measured that forgeable.** So R76's fix
+depends on R75's, and **the two must land as one increment**. Landing R76 alone would produce exactly
+the shape this register keeps recording: a gate whose input the attacker controls.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
