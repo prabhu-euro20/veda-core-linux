@@ -7511,3 +7511,111 @@ Base is still `out`), and it now also demonstrates that a User+ODA principal may
   The probe covers *parity*; the negative test covers *the rule*. Neither substitutes for the other, and
   noticing that is what stopped this increment from shipping with a hole exactly like the 87 vacuous
   retain-all declarations R71 had to reckon with.
+
+### R82. A trap handler can switch purecap OFF, so no identity given to the trap vector can bound it
+
+**Status: MEASURED WITH FOUR VALID CONTROLS. OPEN. This is not an unassisted escape -- a handler is
+trusted code and a compartment cannot install one -- but it is a statement about what CAN BE BUILT, and
+it is the reason R77 is blocked. Found while attacking my own proposed repair for R77.**
+
+#### The two facts
+
+1. **Purecap has no privilege exemption, and that is the whole memory-safety claim.**
+   `ext_data_get_addr` (`postlude/step_ext.sail:169-176`) refuses **every** ordinary load/store while
+   `veda_mode` bit 0 is set:
+   ```
+   if veda_mode[0..0] == 0b1 then Err(PURECAP)          <- global, Machine included
+   else if veda_pcc_length != VEDA_PCC_UNBOUNDED then Err(PURECAP)
+   else OK
+   ```
+   That is the property which makes *"you need a capability"* true rather than advisory. Its own comment
+   says it exists because *"nothing previously stopped that GPR value from then being used as an ordinary
+   LOAD/STORE base with zero capability check at all -- CHERI's own real 'hybrid mode' has this exact
+   same property"*.
+
+2. **`veda_mode` is CSR 0x7C5, and its write gate is exactly the test a trap handler passes.**
+   ```
+   write_CSR(0x7C5, value) =
+     if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then Err
+     else { if cur_privilege == Machine then veda_mode = zero_extend(value[0..0]); ... }
+   ```
+   Trap entry sets `veda_pcc_length = VEDA_PCC_UNBOUNDED` (`veda_regs.sail:350`) and
+   `veda_pcc_object = VEDA_OBJECT_NONE` (`:361`). **Both disjuncts are false. The Machine write fires.**
+
+#### Measured, with four controls, and the first draft of the probe was wrong in an instructive way
+
+```
+  A  0x7C5 read back after boot writes 1        1          purecap really is ON
+  B  traps after an ordinary ld AT MACHINE      1          the rule is real
+  C  its cause                               0x07          VEDA_CAUSE_PURECAP_VIOLATION
+  D  what that ld loaded                        0          genuinely refused
+  ---------------------------------------------------------------------------------
+  >> what the HANDLER read by ordinary ld  0xC0FFEE        a secret it holds no capability for
+  >> 0x7C5 inside the handler after its csrw    0          one instruction did it
+```
+
+**The first draft stored its controls to the signature as it went, and every one of those stores was
+itself refused by purecap** -- so the controls read as zeros and I first read that as *"the control
+failed, so the attack proves nothing"*. The controls had in fact worked perfectly; the probe was
+measuring the mechanism with an instrument the mechanism disables. Fixed by holding every value in a
+register until after purecap is off. **An instrument that the subject can switch off is not an
+instrument** -- and that is the same sentence as the finding itself.
+
+#### Why this reframes R77 rather than adding to it
+
+R77's increment 1 was refuted because a handler could **Populate** an alias and bind it, and the judge's
+verdict was *"bound the trap handler's Populate authority... 0x7CB is cheap and correct after that, not
+before."* **That sequencing is insufficient**, and this is why:
+
+> **The bound an identity would impose is enforced by a switch the principal being bounded can flip.**
+> A handler that cannot bind an alias does not need one: it turns purecap off and uses `ld`.
+
+So bounding Populate closes one route and leaves a shorter one. **The generalisation, and it is the
+fourth of its kind in this register:**
+
+> **An enforcement mechanism cannot constrain a principal that can reach the mechanism's own switch.**
+> R38's attenuation was advisory because `CAndPerm` could clear it. R72's entitlement was advisory
+> because it travelled through memory. R77's identity is advisory because `csrw 0x7c5, 0` exists.
+
+#### The missing mechanism, named precisely, and Veda already has the bit for it
+
+**CHERI answers exactly this question, and the answer is not privilege.** ISAv9 §3.11.1:
+*"Normally, code executing in lower protection rings has access to privileged functions by virtue of
+AMBIENT AUTHORITY. CHERI permits that ambient authority to be constrained via capability permissions on
+the program-counter capability."* The teeth are §4.3.5 Table 4.2's **whitelist**: reading or writing
+**any** CSR requires `PERMIT_ACCESS_SYSTEM_REGISTERS` **on PCC**, with only the counters and the
+floating-point control CSRs exempt. On CHERIoT there is no ring dimension at all (§7.9), so a handler's
+authority is *precisely* its vector's.
+
+**Veda has the bit and does not use it this way.** `PERM_ACCESS_SYSTEM_REGISTERS` is `veda_types.sail:250`
+(bit 7), and its only consumers are the ODA predicate (`veda_ocl_insts.sail:633`, `veda_regs.sail:886`)
+and one data capability at `veda_cap_insts.sail:717`. Meanwhile `veda_allows_CSR_access`
+(`veda_regs.sail`) reads **no capability permission at all**:
+
+```
+match csr {
+  0x305 => (access_type == CSRRead) | ((veda_pcc_length == VEDA_PCC_UNBOUNDED)
+                                        & (veda_pcc_object == VEDA_OBJECT_NONE)),
+  _     => true,
+}
+```
+
+One CSR is gated, on PCC **shape** rather than PCC **permission**, and every other CSR in the machine
+returns `true`.
+
+#### DECIDED: R77 does not get built until CSR authority is carried by PCC. And that is R40's residue, not a new idea
+
+**The correct next increment is not "bound Populate" and not "name the vector".** It is: **make CSR
+access require an authority the PCC carries**, so that a trap vector's narrowing is something the
+handler cannot undo. Only then does naming the vector mean anything, because only then is the
+enforcement outside the bounded principal's reach.
+
+Recorded rather than built here, deliberately -- this register holds five designs refused for being
+chosen before they were priced, and the price of a PCC-permission CSR gate has not been measured. What
+is now known and was not before: **the sequencing R77's judge gave was wrong, and it was wrong for a
+reason that generalises.**
+
+Two things this entry does NOT claim, stated so the severity is not overread: a compartment cannot
+install its own handler (`mtvec`'s write is gated by the same predicate, and R80 made it Direct-only),
+and boot legitimately configures `veda_mode` -- R34 accepted the ambient boot context as architecture.
+**What is new is that the trap handler inherits boot's reach over the enforcement itself.**
