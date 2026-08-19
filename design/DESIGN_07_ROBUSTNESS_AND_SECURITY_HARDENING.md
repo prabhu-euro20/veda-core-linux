@@ -7140,7 +7140,7 @@ multi-hart half joins the Phase 6 checklist beside R10's.
 
 ### R79. The ambient root has THREE occupants and only one of them is boot -- a privilege drop keeps the identity
 
-**Status: MEASURED AT SOURCE, THREE INDEPENDENT WAYS. OPEN. Found while building R77's fix, by an
+**Status: CLOSED ON BOTH LAYERS. Measured at source three independent ways before it was built. Found while building R77's fix, by an
 agent asked to price an obligation; verified by me before being recorded, because the claim was
 larger than the question that produced it.**
 
@@ -7203,6 +7203,91 @@ was. CHERIoT removed the ring dimension entirely (ISA v1.0 §7.9) precisely so t
 arise; CHERI-RISC-V keeps rings and answers it with §3.11.1 -- ambient authority *"constrained via
 capability permissions on the program-counter capability"*, enforced by §4.3.5 Table 4.2's whitelist.
 **Veda keeps the ring dimension and currently constrains nothing across it.**
+
+#### CLOSED ON BOTH LAYERS. Sail 128/128, RTL 112/112, ACT4 51/51, differential 27/27, exit 0
+
+**THE RULE: ambient root is available only to a principal that is both NAMELESS and either in MACHINE
+mode or holding a valid Object Directory Authority.** One conjunct on arm 2 of `veda_bind_domain_ok`
+(`veda_regs.sail`), and its byte-for-byte RTL twin on `$veda_bind_domain_ok` (`veda_core.tlv:2441`) --
+`$priv || $veda_oda_authorized`, the same pair this file already used at `:2828`, `:2917`, `:2922` and
+`:2940` to mirror `cur_privilege == Machine | veda_oda_authorized()`.
+
+Refused, a nameless User principal falls to arm 3 and compares against
+`VEDA_OBJECT_NONE[43..24] = 0xFFFFF = VEDA_DOMAIN_ANY`, so it binds exactly what is **declared** public
+and nothing else. **Fail-closed with no new architectural state, no new sentinel and no new
+instruction.**
+
+##### Why one conjunct sufficed here and did not for R77 -- and the architectural statement behind it
+
+R77's identity mechanism was refuted because its principal could **Populate without bound**. R79's
+principal cannot, and the reason is one line:
+
+```
+veda_oda_denies(base, length) = (cur_privilege != Machine) & not(veda_oda_covers(base, length))
+                                                        veda_ocl_insts.sail:704
+```
+
+At **Machine** that predicate is **always false** -- creation is bounded by nothing. At **User** it
+requires an ODA **and** window coverage.
+
+> **MACHINE MODE IS THE UNBOUNDED CREATION AUTHORITY. THE ODA IS ITS BOUNDED COUNTERPART.**
+> That is why naming a Machine-mode principal buys nothing until Populate is bounded, and why naming
+> the privilege boundary works immediately. It also says R78's complaint (the trap path is Machine-only)
+> and R77's blocker (Machine Populate is unbounded) are **the same fact seen from two sides**.
+
+##### The first draft was Machine-alone, and the corpus refuted it in one run
+
+Machine-alone broke `vc_r47_oda_scope_neg`, whose own comment names itself
+*"CONTROL 1 -- the over-refusal guard, and it is the load-bearing one"*: an ODA holder at User mints
+object 42 **inside its own window**, legitimately, and must then be able to **bind** it. Under
+Machine-alone it could not, because `veda_creating_domain` keys on the **PCC name**, which an ODA does
+not set, so the object was stamped `VEDA_DOMAIN_BOOT` and **its own creator could not name it.**
+**A delegated authority that can create what it cannot use is not a delegation.** The ODA arm is not
+decoration; it is what the measurement demanded.
+
+##### Corpus cost: two tests, both of which were asserting the defect as correct behaviour
+
+| test | what it did | why it is the right break |
+|---|---|---|
+| `sail_tests/vc_r50_oclear.S` | dropped to User with **no ODA and no crossing**, then rebuilt `c5` from the **name** 140 | its subject is OCLEAR, not the bind gate; the rebind was scaffolding that happened to exercise the root |
+| `rtl/sim/veda_smoke_paging_refusals_neg.S` | at User, bound 113 by name to observe that a refused page-out had not half-applied | same shape: a User-mode bind-by-name used as an **observation method** |
+
+Both are fixed the same way and it is **R52's own doctrine rather than a workaround**: one
+`set.domain -> VEDA_DOMAIN_ANY` at Machine before the drop. **Sharing is a declaration, not a default**
+-- exactly what a loader does at load time. Neither test's subject is weakened: `owner_domain` does not
+affect OCLEAR, and it does not affect residency.
+
+##### Both halves proved load-bearing by neutering each in turn
+
+```
+  RTL conjunct removed   -> p25_privilege_drop_root DIVERGES, and the RTL smoke suite stays 112/112
+  Sail conjunct removed  -> vc_r79_privilege_drop_root_neg FAILS, 127/128
+  both in place          -> 128/128, 112/112, 51/51, 27/27, exit 0
+```
+
+**The RTL smoke suite staying green under neuter A is the finding inside the finding**: the RTL half is
+covered by **nothing but the differential probe**. Had I shipped the Sail-only test, the RTL mirror
+could have been deleted and every RTL suite would still have been green.
+
+##### Two tests added, and what each refuses
+
+- `sail_tests/vc_r79_privilege_drop_root_neg.S` -- four rows. **Row C** binds the same boot-owned object
+  at **Machine** and must SUCCEED (boot is untouched); **row B** binds an **ANY-declared** object at
+  User and must SUCCEED. Without B and C, a core that refused every User-mode bind would pass row A for
+  the wrong reason.
+- `difftest/probes/p25_privilege_drop_root.S` -- the same rows **cross-layer**. Measured signature:
+  `w0 = 1` (boot intact), `w2 = 0` (User, no ODA, boot-owned: REFUSED), `w4 = 1` (declared public still
+  binds), `w6 = 0` (the refusal is a quiet soft-fail, not a trap), identical on both layers.
+
+##### RESIDUE, recorded rather than folded in silently -- R81
+
+The ODA arm gives its holder **ambient bind**, which is **broader than the ODA's own window**. R47 made
+the window load-bearing on the seven ODT instructions; `veda.bind` is **not among them and reads no ODA
+field at all** -- `grep -c oda veda_bind_insts.sail` returns **0**. So an ODA holder can still bind
+objects whose memory lies outside its window. That is **not new** -- arm 2 already granted it to
+everybody -- but removing everyone else from the arm is what makes it **visible**, and concentrating an
+authority is exactly when this register requires asking who else now stands there. Recorded as its own
+finding rather than closed here, because it has not been measured yet.
 
 #### Candidate rule, NOT yet chosen and deliberately not built with R77
 
