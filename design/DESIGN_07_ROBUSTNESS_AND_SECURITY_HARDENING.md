@@ -6818,6 +6818,70 @@ this register contains four designs refuted for being chosen before they were pr
 before choosing, because this register has four crossing-side designs in it that were refuted for
 being chosen before the cost was priced.
 
+### R78. Two mechanisms are gated against their own beneficiaries -- and one of them is R72 Form 2's prerequisite
+
+**Status: ALREADY WRITTEN DOWN IN THE SOURCE, RE-READ AND CONNECTED. Not a new measurement -- the
+model records both halves honestly and measured them itself. What is new is that this is R74's shape
+repeating, that there are TWO instances rather than one, and that one of them BLOCKS the mechanism
+R72 Form 2 most naturally wants.**
+
+#### The source's own words
+
+`veda_regs.sail:61-100`, on the SSC (Stack-Spill Capability), which exists *"to let ordinary compiled
+C's ABI-mandated callee-saved register spills/reloads route through real OCL.D/OCS.D checks instead of
+raw sd/ld"* -- because Milestone 19's purecap rule traps a raw `sd` inside a live compartment. Both
+crossings deliberately untag it, so a callee cannot inherit the caller's stack, and the recovery story
+was *"the entered compartment re-establishes its own SSC via an explicit OSpecialRW."*
+
+That sentence is false, and the model says so under its own heading:
+
+> **R48/R49 CORRECTION -- THAT LAST SENTENCE IS FALSE BELOW MACHINE.** *"`VEDA_OSPECIALRW` is gated
+> `if cur_privilege != Machine then Illegal_Instruction()` -- for READ and WRITE, on all three SCRs, on
+> both layers ... So a User compartment CANNOT re-establish its own SSC, and a User compartment is
+> precisely the principal this mechanism exists for."*
+
+And the honest residual, also the model's own: *"the SSC mechanism has **NO REACHABLE USER** in the
+privilege configuration this design actually ships. Redundant-and-unusable below Machine, not
+load-bearing-and-broken."* Re-verified: `veda_cap_insts.sail:1012` and, on the RTL,
+`$veda_ospecialrw_violation = $is_veda_ospecialrw && !$priv`.
+
+**The ODA has the identical defect and it costs more there.** R48 inherits the same false recovery
+story, and *"there it costs availability rather than nothing: a User caller that crosses loses its ODA
+and must trap to Machine to be re-delegated one."*
+
+#### Why this is a finding and not just a comment
+
+**It is R74's shape, and R74 was found the same way -- by asking who the mechanism is FOR.** R71 put a
+retain mask at CSR `0x7CA`, whose privilege is encoded in the address as Machine-only, while the
+compartments its own text told to write it are unprivileged by definition. The fix was to move it to
+`0x8CA`, the one Custom read/write **User** range the RISC-V Privileged specification allocates.
+
+**Here the same shape appears twice more, and the gate is an instruction rather than an address**, so
+the R74 remedy does not transfer directly -- `VEDA_OSPECIALRW`'s gate is a privilege test inside the
+clause, not a bit pattern in a CSR number. The class is the same: **a mechanism whose gate excludes
+its own beneficiary.** Recording it as a class rather than as two comments is what makes it
+schedulable.
+
+#### And it is R72 Form 2's prerequisite, which is the part that changes a plan
+
+CHERI's local/global pair -- the shape R72 Form 2 most naturally wants, and this register's open R42 --
+does not forbid storing a non-global capability outright. **It permits it through a container that
+bears `PERM_STORE_LOCAL_CAPABILITY`, and in practice that container is the STACK.** That is precisely
+why local/global does not break compiler spill/reload: a spill goes to the stack, which holds the
+permission; a hand-off to a shared object does not.
+
+**Veda-Core's analogue of that privileged container is the SSC, and the SSC has no reachable user.**
+Measured here: capability spill in the corpus
+(`sail_tests/vc_ocsc_bind_spill_restore_roundtrip.S:65`) goes through an **ordinary capability**, not
+the SSC -- `ocs.c c6, x5, c0`. So today **spill and hand-off are the same instruction through the same
+kind of container, and the hardware cannot tell them apart.**
+
+**Consequence for the mechanism choice**: any Form 2 rule that restricts what `OCS.C` may store will
+hit compiler spill unless there is a distinguished container -- and the distinguished container this
+architecture already designed is unreachable. **Either the SSC gets the R74 treatment first, or the
+Form 2 mechanism must be one that does not need a container notion at all.** That is now a stated
+constraint on the design pass rather than a surprise inside it.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**

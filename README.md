@@ -68,7 +68,7 @@ Docs 00-06 are the original sequenced decisions; 07 and 08 were added as the wor
 | 04 | `design/DESIGN_04_PIPELINE.md` | Object-Bind = capability-load micro-op; checks parallel to addr-calc | synthesis study (95<114 gates), M24 stall FSM |
 | 05 | `design/DESIGN_05_PURECAP_PRIVILEGE_PROCESS.md` | pointer = capability; privilege = ODA possession | OCL.C/OCS.C, tag memory, ODA, `mstatus.MPP`/`mret` (R36 retired `droppriv`) |
 | 06 | `design/DESIGN_06_BUILD_ORDER_AND_OPEN_QUESTIONS.md` | Sequenced plan; names the ODT trilemma (since resolved in 08) | whole-project Sail-first discipline |
-| 07 | `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md` | Adversarial 6-lens red-team (R1-R9) **plus sixty-eight more findings, R10..R77, produced by BUILDING it** -- the register runs R1..R77 with no gaps | the whole verified base + 01/08 |
+| 07 | `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md` | Adversarial 6-lens red-team (R1-R9) **plus sixty-nine more findings, R10..R78, produced by BUILDING it** -- the register runs R1..R78 with no gaps | the whole verified base + 01/08 |
 | 08 | `design/DESIGN_08_OBJECT_NAMESPACE_SCALE.md` | The ODT trilemma, **resolved**: domain-segmented Object_ID `{region:20, local:24}` + the CRBR | ODT, Region Table, the 06 trilemma |
 
 ---
