@@ -6394,6 +6394,113 @@ and what CHERIoT's loader does when it splits root capabilities into software ro
 depends on R75's, and **the two must land as one increment**. Landing R76 alone would produce exactly
 the shape this register keeps recording: a gate whose input the attacker controls.
 
+### R75 + R76 increment 1 -- THE MECHANISM IS DECIDED AND THE COST IS MEASURED. NOT LANDED.
+
+**Status: PROTOTYPED IN SAIL, ALL THREE MEASURED ESCALATIONS VERIFIED CLOSED, COST MEASURED, THEN
+REVERTED DELIBERATELY. The tree is back at 123/123 and the three probes are open again. This entry
+exists so the next pass starts from a settled mechanism and a real number rather than an estimate --
+the same discipline R50 increment 2 used, and for the same reason: a Sail-only landing would put the
+two layers in genuine disagreement about who may bind, which is worse than the hole.**
+
+#### Why every crossing-side proposal was the wrong shape
+
+Four mechanisms were designed and all four were refuted. The reason they share is visible only once
+R75b is in hand: **the forge does not depend on region collision, it depends on `VEDA_DOMAIN_ANY`.**
+R75 binds A's **code object** by name; R75b binds the **type authority** by name; R76 does not bind at
+all, it re-stamps. All three consume the same single value, and it is written at **Populate**, not at
+a crossing. A test added to a crossing while the ingredients stay open is decoration.
+
+The official-document pass gave the statement that makes this structural rather than incidental.
+CHERI ISAv9 (UCAM-CL-TR-987), fetched from the canonical Cambridge URL and read locally, states the
+closure property outright:
+
+> *"through inductive properties of the instruction set, from the point of CPU reset, via guarded
+> manipulation ... it is not possible to 'forge' capabilities or otherwise escalate privilege"*
+
+**Veda-Core's `veda.bind` is a mint-from-a-NAME, so that closure property does not hold by
+construction.** That is the price of being object-centric, and it is not a defect. What follows from
+it is: **`owner_domain` is the only thing standing in for CHERI's provenance closure**, and it was
+open by default (R52's ambient arm) and rewritable by a non-owner (R76).
+
+#### The mechanism, and it is two edits
+
+**Edit 1 -- the ambient creation domain.** A new sentinel, verified free before use (`0xFFFFE` appears
+nowhere as a domain on either layer, with `0xFFFFF` as the control proving the grep finds real hits):
+
+```
+let VEDA_DOMAIN_BOOT : bits(20) = 0xFFFFE
+
+function veda_creating_domain() -> bits(20) =
+  if veda_pcc_object == VEDA_OBJECT_NONE then VEDA_DOMAIN_BOOT   // was VEDA_DOMAIN_ANY
+  else (veda_pcc_object)[43 .. 24]
+```
+
+**`veda_bind_domain_ok` needs NO edit at all**, and that is the neatest part of the design. Its three
+arms already read: ANY passes; ambient passes; otherwise `owner_domain == veda_pcc_object[43..24]`.
+`0xFFFFE` equals no real region, so a BOOT-owned object becomes bindable **only from ambient** --
+using the gate exactly as it already stands.
+
+**Edit 2 -- the ownership term R76 found missing**, placed after the existing `veda_domain_nameable`
+guard in `VEDA_ODT_SET_DOMAIN`:
+
+```
+if not(veda_pcc_object == VEDA_OBJECT_NONE
+       | old_entry.owner_domain == (veda_pcc_object)[43 .. 24]) then Illegal_Instruction()
+```
+
+You may re-stamp only what you already own; the ambient context is the one exempt principal, because
+somebody must perform the initial delegation. That is CHERI's reset root and CHERIoT's loader
+splitting root authority into software roots, expressed in this machine's own terms.
+
+#### Measured after the prototype -- all three chains closed at their FIRST instruction
+
+```
+poc_r75_forged_domain_identity   CLOSED   veda.bind c9, CODE_A now TRAPS at compB+20
+poc_r75b_forged_sealed_pair      CLOSED   veda.bind c7, TYPEAUTH now TRAPS at compB+20
+poc_r76_restamp_owner_domain     CLOSED
+```
+
+**The crossings were never touched.** R75's chain dies at step 1 of 3, and it dies because the object
+it wanted was never public -- not because a crossing grew a test.
+
+#### The measured cost, and it is one shape
+
+**8 of 123 Sail self-checks**, and the second edit added **none** of them -- the bill is entirely the
+creation default. Every failure is the same shape: **a compartment binding an object the ambient
+context created.**
+
+```
+vc_bind_domain_neg              vc_r52_creation_domain          vc_scheduler_cooperative_yield
+vc_r10_crbr_invoke_trap_return  vc_r58_domain_writers           vc_ssc_cross_thread_isolation
+vc_r50i2_crossing_clear         vc_r73_bind_mode_refusal
+```
+
+That is **R17's tension, measured instead of argued.** R17 was retracted because forbidding
+cross-domain Bind made compartments one-way; this does not forbid it, it requires that it be
+**declared**. The re-aiming is one `set.domain` per object in each file's ambient setup -- boot saying
+who may bind what, which is the thing an operating system does at load time anyway.
+
+#### Why it was reverted rather than half-landed
+
+Completing it means: 8 Sail tests re-aimed, the RTL mirrored, the RTL twins re-aimed, the shipped
+switcher given explicit delegation, and all four suites run. **A Sail-only landing would make the two
+layers disagree about who may bind an object** -- a real divergence the differential harness exists to
+catch, and the exact "half a fix is worse than none" state R50 increment 2 and R67 both recorded.
+
+So: reverted clean, tree green at 123/123, probes open again and verified open, mechanism settled,
+cost known. **What the next pass owes is execution, not design.**
+
+#### What this does NOT close, stated now
+
+- **Region granularity.** The shipped switcher puts every object in region 0, so any region-keyed rule
+  is inert *there*: thread 0 and the scheduler are the same principal by construction. This mechanism
+  makes the objects non-public, which closes the measured chains, but a deployment that puts distinct
+  principals in one region is still indistinguishable to the hardware. **The principal granularity
+  question is genuinely open** and is not decided here.
+- **R72's transfer path.** Nothing here asks the dereference or the capability-store a domain
+  question. R72 stays open, and it is now unblocked in the sense that matters: once this lands, a
+  mechanism keyed on domain identity is keyed on something sound.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**

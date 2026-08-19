@@ -410,6 +410,46 @@ it is chosen**, because the container's descriptor is already looked up on that 
 referent's is not, and a second table lookup in one instruction is exactly the class of cost that
 refuted an earlier design.
 
+**The three biggest things found since are all open, and they are the same finding seen three ways.**
+**R75**: a compartment refused an object by name obtained the identity that owns it -- `veda.bind` A's
+code object, `csealentry`, `ocreturn` -- and then bound the same object successfully, zero traps, both
+layers identical. **R75b**, which refuted R75's own first diagnosis the same day: the type authority is
+ambient-created too, so a compartment binds it by name, mints its own sealed pair, and `ocinvoke`
+works just as well -- **both crossings are forgeable, and a sealed pair is evidence of nothing while
+the seal authority is bindable by name.** **R76**: `veda.odt.set.domain` never asks whether the actor
+owns the object it re-stamps, so at Machine the gate's own input is rewritable in one instruction,
+with none of the forging.
+
+**The mechanism is now decided and its cost measured, and it is two edits.** Four crossing-side designs
+were built and all four refuted, and the reason they share only became visible with R75b in hand: the
+forge does not depend on region collision, it depends on **one value** -- `VEDA_DOMAIN_ANY` -- and that
+value is written at Populate, not at a crossing. A test added to a crossing while the ingredients stay
+open is decoration.
+
+The official-document pass gave the statement that makes this structural. The CHERI ISA specification
+rests on a **closure property**: capabilities cannot be forged, *"from the point of CPU reset, via
+guarded manipulation"*. **Veda-Core's `veda.bind` mints from a NAME, so that property does not hold by
+construction** -- which is the price of being object-centric, and is not a defect. What follows is
+that **`owner_domain` is the only thing standing in for CHERI's provenance closure**, and it was open
+by default and rewritable by a non-owner.
+
+Prototyped and measured: a `VEDA_DOMAIN_BOOT` sentinel returned by the ambient creation arm, plus an
+ownership term on `set.domain`. The bind gate itself needs **no edit** -- the sentinel equals no real
+region, so its existing third arm does the work. **All three attacks close at their first
+instruction, and the crossings are never touched.** The bill is **8 of 123** self-checks, every one
+the same shape: a compartment binding an object the ambient context created. That is R17's tension
+measured rather than argued -- R17 was retracted for *forbidding* cross-domain Bind; this does not
+forbid it, it requires that it be **declared**, which is what a loader does at load time anyway.
+
+It was **reverted clean rather than half-landed**: a Sail-only landing would make the two layers
+disagree about who may bind an object, which this project has twice recorded as worse than the hole.
+What the next pass owes is execution, not design.
+
+**What is still genuinely undecided**: the shipped switcher puts every object in one region, so any
+region-keyed rule is inert there -- thread and scheduler are the same principal by construction. The
+mechanism above makes the objects non-public, which closes the measured chains, but **the principal
+granularity question -- is a principal a region, or an object? -- is open and is not decided here.**
+
 **Reproducing all of it is one command**: `veda-core/verification.sh` in the implementation repo. It
 runs the Sail self-check suite, the RTL milestone suite, the ACT4 conformance suite and the
 cross-layer differential suite. As of 2026-08-19: **123/123, 112/112, 51/51, 25/25**, and it now ends
