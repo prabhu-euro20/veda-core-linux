@@ -7603,7 +7603,28 @@ match csr {
 One CSR is gated, on PCC **shape** rather than PCC **permission**, and every other CSR in the machine
 returns `true`.
 
-#### DECIDED: R77 does not get built until CSR authority is carried by PCC. And that is R40's residue, not a new idea
+#### CORRECTED -- R82 IS NOT A BLOCKER FOR R77, AND R77'S OWN SENTINEL IS WHY
+
+**An adversarial pass refuted the sequencing paragraph below within the hour, and it is right.** Verified
+at source before accepting it: `write_CSR(0x7C5)`'s Milestone-20 gate is
+
+```
+if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then Err(())
+```
+
+R77's mechanism installs **`VEDA_OBJECT_NOBODY`** at trap entry. `NOBODY` is not `NONE`, so the **second
+disjunct becomes TRUE** and `csrw 0x7c5` from a handler becomes `Illegal_Instruction`. The same holds for
+`0x7C0`-`0x7C3` (`veda_regs.sail:737, :742, :747, :752`) and for the `mtvec` gate. **The route R82 names
+is closed by the very sentinel R82 is cited to block.**
+
+R82 **remains a valid finding about the SHIPPED machine**, where a handler genuinely is
+`VEDA_OBJECT_NONE` and genuinely can flip the switch -- the measurement stands. What is withdrawn is the
+**sequencing conclusion**. The real blockers are **R83** (purecap is off by default, so the handler needs
+no switch at all) and **R85** below (an identity installed at trap entry is not durable). Recorded rather
+than quietly edited: *a blocker that the blocked mechanism itself removes is an expired justification*,
+and this register has paid for that shape before.
+
+#### The paragraph that was wrong, kept verbatim: R77 does not get built until CSR authority is carried by PCC
 
 **The correct next increment is not "bound Populate" and not "name the vector".** It is: **make CSR
 access require an authority the PCC carries**, so that a trap vector's narrowing is something the
@@ -7801,3 +7822,58 @@ purecap programme sits behind it.
 
 **Kept in the repo as `sail_tests/poc_r84_purecap_has_no_io.S`**, deliberately as a `poc_` because it
 cannot pass: every check in it succeeds and the machine then has no way to say so.
+
+
+### R85. `mepc` is a bare address too -- an identity installed at TRAP ENTRY is not durable
+
+**Status: VERIFIED AT SOURCE. OPEN. Found by an adversarial pass against my own proposed R77 repair, and
+it refutes that repair without touching Populate, purecap, or any capability.**
+
+R77's diagnosis was *"`mtvec` is a bare ADDRESS in an address-less machine"*. **The same is true of the
+exit.** Three facts compose:
+
+1. `veda_mepcc_object = veda_pcc_object` at depth 0 (`veda_regs.sail:336`) saves the **interrupted**
+   identity, and `veda_pcc_object = veda_mepcc_object` (`:451`) restores it on the outermost unwind.
+2. **`mepc` has no Veda gate at all.** `veda_allows_CSR_access` special-cases **only** `0x305`; every
+   other CSR, `mepc` (`0x341`) included, returns `true`.
+3. `MRET` has no Veda gate either -- `extensions/I/base_insts.sail:565-584` gates only on
+   `cur_privilege` and calls `veda_pcc_restore_on_xret()` unconditionally.
+
+So a handler executes `csrw mepc, <an address of its choosing>; mret` and **resumes as whatever
+principal it interrupted**. When that principal was **boot** -- the ambient root, and the state R77 says
+must be safe -- the handler returns as ambient root, at an address it chose, with `veda_pcc_length`
+unbounded and `veda_pcc_base` zero, so the fetch bound cannot stop it either. Every closure the
+identity buys is undone one instruction later.
+
+> **No identity installed at trap ENTRY can be durable while the handler chooses where the RETURN lands
+> and inherits the interrupted principal's name.** R77's own diagnosis, applied to the exit.
+
+**Consequence for sequencing**: the correct increment on this line is a **bounded return target**, not a
+vector name. Not built -- the price has not been measured, and `mepc` is a standard RISC-V CSR whose
+semantics cannot be narrowed without a conformance argument of the kind R80 had to make for `mtvec`.
+
+### R86. `page.out` / `page.in` relocate a victim's object with its owner intact, and the design's own contract walks the victim in
+
+**Status: VERIFIED AT SOURCE. OPEN. Independent of every escalation closed so far -- the attacker mints
+nothing and holds no capability.**
+
+Both halves of the paging pair copy `owner_domain = old_entry.owner_domain` (`veda_ocl_insts.sail:1460`
+and `:1591`) and **neither has any ownership term**. At Machine, `veda_oda_denies` and
+`veda_stale_authority` are both identically false, since each leads with `cur_privilege != Machine`. The
+executing-object pin does not cover the gap: its `live_hit` arm (`veda_regs.sail:1597-1601`) requires
+`veda_pcc_length != VEDA_PCC_UNBOUNDED` and an overlap with the **running** PCC window, so it pins the
+interrupted compartment's **CODE** object and **not its data objects**.
+
+So a Machine trap handler can take a victim compartment's DATA object, `page.out`, then `page.in` at a
+frame the attacker's own compartment already owns. `owner_domain` is untouched, so **the victim's own
+re-Bind succeeds** and hands the victim a capability over attacker-controlled memory.
+
+**And the design's own documented contract is what walks the victim into it** (`veda_ocl_insts.sail:1152-1160`):
+*"The chosen resolution bumps `generation` on PAGE-OUT -- holders then take the existing
+stale-capability trap (0x02), re-Bind, and receive the new Base."* The re-Bind is not a mistake by the
+victim; it is the architecture telling it what to do.
+
+**Not built.** The natural rule is that relocation is an ownership operation and needs an ownership term
+like the one R76 gave `set.domain` -- but that must be priced against the fact that paging is exactly
+what a Machine-mode pager legitimately does, which is the same tension R47 resolved for the ODA by
+scoping the *authority* rather than forbidding the *operation*.
