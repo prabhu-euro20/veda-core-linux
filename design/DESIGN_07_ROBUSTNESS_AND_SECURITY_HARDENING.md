@@ -7815,10 +7815,78 @@ be made an explicit rule with a test rather than an accident of the upstream sig
 family (`OCL.D`/`OCS.D`) is what I/O needs; the capability family (`OCL.C`/`OCS.C`) against a device
 region should be **refused**, not silently tag-stripped.
 
-**Not built here.** The measurement is recorded, the fix is identified, and the price -- eight call
-sites, a new refusal rule, and its test on both layers -- has not been paid or measured. What is now
-known and was not: **R83's step 1 is not a macro change, it is a memory-path change**, and the whole
-purecap programme sits behind it.
+**Not built. But now fully specified and priced, and the two open questions are DECIDED.**
+
+##### The gap is NARROWER than the general statement, measured cross-layer
+
+The general claim -- *a capability access reaches RAM and nothing else* -- is structurally true, but its
+practical bite is smaller, and the difference matters. Probe `p_r84_capio.S` run through the differential
+harness: an object populated **over the signature region**, written with `OCS.D` and read back with
+`OCL.D`, **agrees with an ordinary `sd` on both layers** (`0xAAAA`, `0xBBBB`, `0xBBBB`, identical). That
+region is RAM-backed in this flow, so `write_ram` reaches it.
+
+**The gap bites only for TRUE devices: HTIF and the CLINT.** That is exactly where it hurts -- the halt
+signal and the timer -- but *"capability accesses are broken"* would be an overread of my own finding.
+
+##### And it is a Sail/RTL ASYMMETRY, not a shared defect
+
+- **Sail** has a device layer: `mem_write_value*` splits MMIO from RAM at `sys/mem.sail:461`.
+- **The RTL has no device concept at all.** Its smoke testbenches watch an architectural *register*
+  (`tb_veda_smoke_m9.sv:35`, `dut.CPU_Xreg_val_a0[21]`); the ACT4 testbench polls the `tohost` word in
+  the **flat memory array**. There is no MMIO routing there to bypass.
+
+So R84's fix is **Sail-side** -- and it exposes a second, separate gap: **the RTL cannot model a device
+at all**, which Phase 3's timer will need.
+
+##### The complete recipe, every piece established at source so the increment is mechanical
+
+| what | where |
+|---|---|
+| sites, data family (**this increment**) | `veda_ocl_insts.sail:270` (`VEDA_OCL`), `:284` (`VEDA_OCS`) |
+| sites, other families (**increment 2**) | `:338`/`:379` (OCL.C/OCS.C, 32 B with tag), `:551`/`:554` and `:570`/`:573` (NMC), `veda_atomic_insts.sail:75`/`:88` |
+| read call | `mem_read_priv_meta(access, pbmt, priv, paddr, width, aq, rl, res, meta)` -- exact shape at `sys/mem.sail:344` |
+| write call | `mem_write_value_priv_meta(paddr, width, value, access, pbmt, priv, meta, aq, rl, con)` -- `:502`, `:508` |
+| access type | `Load(Data)` / `Store(Data)` -- **not** `Read`/`Write`; confirmed at `extensions/I/base_insts.sail:291` |
+| page type | `PBMT_PMA` (`sys/pma.sail:129`) |
+| error shape | `type MemoryOpResult('a) = result('a, (physaddr, ExceptionType))` (`sys/sys_control.sail:417`) |
+| raising it | `memory_exception(vaddr, exc) = trap(make_sync_exception(exc, bits_of(vaddr)))` (`sys/insts_begin.sail:58`) |
+| what must NOT be reused | `vmem_read` / `vmem_read_addr` -- they perform **address translation, page splitting and misalignment handling**, none of which Veda may do: its `paddr` is already physical and its bounds are its own |
+
+##### DECISION 1 -- a device-side error is the STANDARD access fault, never a Veda cause
+
+Every Veda cause code answers one question: **"you were not permitted."** A device error answers a
+different one: **"it did not work."** Giving a physical failure a Veda cause would let software read a
+malfunction as an authority denial, and an authority denial as a malfunction. That is the same confusion
+**R64** resolved by giving the fault channel its own CSR rather than overloading `mtval`, and the same
+separation **R80** kept between a WARL legalisation and a security refusal. So `Err((Physaddr(a), e))`
+becomes `memory_exception(..., e)` with the standard `ExceptionType`, and **no new Veda cause code is
+allocated.**
+
+##### DECISION 2 -- `OCL.C` / `OCS.C` against a device region is REFUSED, not tag-stripped
+
+`mmio_write` takes no `meta`. Routing the capability family through it unchanged would mean a capability
+stored to a device **silently loses its tag** -- it would look stored and be dead. **A silent downgrade
+is exactly the shape this register has now refused four times**: R38's attenuation, R72's entitlement,
+R77's identity, R81's window. A rule that degrades quietly instead of refusing loudly is advisory.
+
+A device register genuinely cannot hold a capability, so refusing is not a limitation being imposed --
+it is the truth being stated. It must be an **explicit rule with its own test**, not an accident of an
+upstream function's signature. The data family is what I/O needs; the capability family has no business
+addressing a device.
+
+##### Left OPEN because it is unpriced, rather than guessed
+
+Whether **NMC** and **Veda-Atomic** should also be refused on devices. Both are read-modify-write, which
+is meaningful against some device registers and meaningless against others. That needs the device model
+Phase 3 will bring.
+
+##### Why this was not implemented in the same pass, stated plainly
+
+The change touches the memory path of every `OCL.D`/`OCS.D` in **129 passing tests**, and at the point
+of writing I had accumulated three small type uncertainties -- the access-type constructor names, the
+address widths, and the `Err` payload shape. **Landing a half-checked memory-path change is precisely
+what this register punishes.** The table above removes every one of those uncertainties, so the next
+increment is mechanical rather than exploratory.
 
 **Kept in the repo as `sail_tests/poc_r84_purecap_has_no_io.S`**, deliberately as a `poc_` because it
 cannot pass: every check in it succeeds and the machine then has no way to say so.
