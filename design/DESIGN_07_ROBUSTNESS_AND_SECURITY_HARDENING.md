@@ -7411,3 +7411,103 @@ it before I claimed anything.**
 - `difftest/probes/p24_mtvec_mode.S` -- the same five rows compared **cross-layer**, which is the
   instrument that should have caught this and had no probe that could. Its signature carries real
   values, not zeros: `0`, `0x80001000`, `0x80002000`, `0x80003000`, `0xC0DE`, identical on both layers.
+
+### R81. The ODA's window bounded what its holder could CREATE and nothing about what it could BIND
+
+**Status: MEASURED BEFORE IT WAS DESIGNED, CLOSED ON BOTH LAYERS, BOTH HALVES PROVED LOAD-BEARING.
+Sail 129/129, RTL 112/112, ACT4 51/51, differential 28/28, `verification.sh` exit 0.**
+
+R79's fix made ambient root Machine-or-ODA. That narrowed the population holding it from *everybody at
+User* to *ODA holders*, and **narrowing it is what made the remaining grant legible** -- which is the
+question this register requires after concentrating an authority: who else now stands there.
+
+#### The defect
+
+R47 adopted, in its own words, *"on the DELEGATED path only, the memory a descriptor names -- what the
+entry names now, AND what it will name after -- must lie inside the ODA's own window"*, and applied it
+to the **seven** ODT-management instructions. **`veda.bind` is the eighth consumer of that authority
+and read no ODA field at all** -- `grep -c oda veda_bind_insts.sail` returns **0**, and the RTL's
+`$veda_bind_domain_ok` had no window term either.
+
+#### Measured first, and the control caught a bug in my own probe
+
+`sail_tests/poc_r81_oda_bind_outside_window.S`, kept in the repo uninverted. An ODA holder at User whose
+window covers `win` alone:
+
+```
+  w0  boot binds an OUT-of-window object at MACHINE        1          (control)
+  w2  the ODA holder binds the SAME object at User         1   <---   the escalation
+  w4  and reads through it                            0xC0FFEE  <---  and it works
+  w6  the same holder binds an IN-window object            1          (anti-vacuity)
+  w8  traps taken                                          0   <---   SILENT
+```
+
+**The first run of that probe reported `w6 = 0` with two traps, and the control is what exposed it:**
+the bug was mine -- I had used `x15`/`x16` as **capability** destinations, and the capability file is
+`c0..c15`, so `c16` sets the reserved bit above a 4-bit `vcapno` that **R30(b)** makes illegal. Without
+the anti-vacuity row the probe would have reported an escalation *and* a broken control and I would have
+believed both halves. **A control that fails is worth as much as one that passes.**
+
+#### The rule, and the arm structure IS the statement
+
+> **An authority's scope bounds what it authorises, and nothing else.**
+
+R79's ambient arm is split in two, because the two principals standing in it are bounded by different
+things:
+
+| arm | principal | window? | why |
+|---|---|---|---|
+| 1 | any object declared `VEDA_DOMAIN_ANY` | **no** | the owner **declared** it public; a declaration is not the ODA's to bound |
+| 2 | nameless + **Machine** | **no** | bounded by nothing, and R47 refused to scope Machine because *"scoping it would be theatre"* -- that decision stands |
+| 3 | nameless + **ODA** | **YES** | the ODA granted this bind, so the ODA's window bounds it |
+| 4 | domain match | **no** | the compartment's **own identity** authorised this bind, not its ODA |
+
+#### It costs nothing new, verified at source rather than assumed
+
+The check that refuted R50's GPR-mask ABI, run **before** the design was chosen:
+
+- The bind path **already holds the entry** -- it reads `owner_domain`, `Base`, `Length`, `Perms` and
+  `generation` to mint from -- so `veda_oda_covers(e.Base, e.Length)` needs **no second lookup**.
+- The RTL's `$veda_oda_denies_old` is **already computed** from `$veda_odt_base`/`$veda_odt_length`
+  (`veda_core.tlv:4676-4677`), the very signals the bind gate stands next to. **No new read port.**
+- **All three bind modes are covered by construction**: R73 routes `BIND`, `BIND_NOTRAP` and `REBIND`
+  through this gate, and it has **exactly one caller** (`veda_bind_insts.sail:367`), verified by grep.
+  No R68 shape.
+
+#### The refusal is quiet, deliberately
+
+`veda_bind_domain_ok` failing is **mode-dependent** (R73): plain Bind traps, the two quiet modes
+soft-fail to tag 0. Folding the window into the same predicate means a refusal for *"outside my window"*
+is **indistinguishable** from one for *"wrong domain"* -- so the window does not become a trap-cause
+oracle. That is the same hazard R47 named as **D-7** and avoided by giving all seven refusals one cause.
+And a holder cannot binary-search its window by creating probe objects, because **Populate is already
+window-checked**, so every object it can place is inside the window already.
+
+#### Corpus cost: one test, whose observation method was itself an instance of the defect
+
+`vc_r47_oda_scope_neg.S` verified twice, **from User**, that object 43 was *"UNTOUCHED, not merely
+un-repointed"* after ATTACK 4 and ATTACK 5 -- **by binding it**. Object 43 lives at `out`, deliberately
+outside that ODA's window, which is the whole premise of both attacks. So the check was an ODA holder
+reaching an object its window does not cover: **the very thing R81 closes.**
+
+Both checks now run in a **Machine-side epilogue** inside the trap handler, from the principal that
+actually owns 43. **The test is stronger, not weaker**: it still asserts both effects (43 binds, and its
+Base is still `out`), and it now also demonstrates that a User+ODA principal may no longer touch it.
+
+#### Both halves proved load-bearing
+
+```
+  RTL window term removed   -> p26_oda_bind_window DIVERGES, RTL smoke suite stays 112/112
+  Sail window term removed  -> vc_r81_oda_bind_window_neg FAILS, 128/129
+  both in place             -> 129/129, 112/112, 51/51, 28/28, exit 0
+```
+
+#### Two tests, and why BOTH were needed
+
+- `difftest/probes/p26_oda_bind_window.S` -- cross-layer. It is what catches an RTL that fails to mirror,
+  and the RTL smoke suite staying green under the neuter proves it is the **only** such coverage.
+- `sail_tests/vc_r81_oda_bind_window_neg.S` -- absolute values. **A differential probe expecting AGREE
+  pins agreement, not correctness**: if BOTH layers were permissive it would still agree and still pass.
+  The probe covers *parity*; the negative test covers *the rule*. Neither substitutes for the other, and
+  noticing that is what stopped this increment from shipping with a hole exactly like the 87 vacuous
+  retain-all declarations R71 had to reckon with.
