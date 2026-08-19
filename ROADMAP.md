@@ -295,7 +295,7 @@ Two findings rejected on verification (recorded so they are not re-raised): ODT-
 already isolated from base-ISA stores by construction; TCM static placement already covers the
 same-hart cross-compartment case (no flush needed).
 
-## Hardening found by BUILDING it -- R10..R76, and why this section exists
+## Hardening found by BUILDING it -- R10..R77, and why this section exists
 
 **The section above records the 2026-08-11 red-team pass, which reasoned over DESIGN_00-06 and
 produced R1..R9 plus Rev-A..Rev-F. It is intact and still correct. It is also only a third of the
@@ -307,7 +307,7 @@ which is the argument for keeping the Sail model and the RTL as two independentl
 a differential harness between them.
 
 **All seventy live in `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which now runs
-R1..R76 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
+R1..R77 with no gaps, re-audited 2026-08-19.** A register-integrity audit on 2026-08-18 found four numbers with no entry --
 R18, R25, R27, R28 -- and **three of them were shipped, verified hardware fixes**, two of exploitable
 class, invisible because they had landed under a parallel `RTL-n` numbering or been co-committed under
 another finding's heading. They are entered now.

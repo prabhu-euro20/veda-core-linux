@@ -6551,6 +6551,80 @@ a file has none.
   question. R72 stays open, and it is now unblocked in the sense that matters: once this lands, a
   mechanism keyed on domain identity is keyed on something sound.
 
+### R77. The trap path is a fourth compartment entry with root authority and no register barrier -- and increment 1 made that authority larger
+
+**Status: MEASURED END TO END. OPEN. Found by attacking my own increment within the hour of landing
+it, which is this register's own rule. NOT an unassisted escape, and the severity is stated at the
+level the measurement supports: the handler is trusted code and a compartment cannot install its own,
+since `mtvec` is Machine-only. What grew is the SIZE of that trust.**
+
+#### Two facts, each read at source, that compose into one
+
+1. **A trap makes you ambient.** `veda_pcc_save_and_reset` (`veda_regs.sail:321-361`) executes
+   `veda_pcc_object = VEDA_OBJECT_NONE` on every trap. That sentinel is exactly the ambient value --
+   and **R75/R76 increment 1 made ambient the root of all authority**: arm 2 of `veda_bind_domain_ok`
+   passes it everything, and `set.domain`'s new ownership term exempts it so boot can delegate.
+2. **Nothing clears the capability file on that path.** `veda_crossing_clear` has **exactly two call
+   sites** -- `veda_cap_insts.sail:604` (OCInvoke) and `:930` (OCReturn). Verified by grep. Neither
+   trap entry nor `xret` is among them, so the capability register file crosses a trap **intact in
+   both directions**.
+
+#### Measured, not reasoned about
+
+`poc_r77_trap_is_ambient.S`. A compartment in region 1, holding only what boot delegated to it:
+
+```
+CONTROL   veda.bind.notrap SECRET      ->  cgettag 0     refused, and quietly
+FAULT     ld x17, 0(x0)                ->  trap (purecap refuses an ordinary load)
+HANDLER   veda.bind c6, SECRET         ->  SUCCEEDS, no trap  (ambient binds anything)
+          mret
+BACK      cgettag c6                   ->  1              IT SURVIVED THE MRET
+          ocl.d through it             ->  0xC0FFEE       and it still works
+```
+
+**SECRET was never delegated to anybody.** The handler minted it because it was ambient, and the
+capability came back into the compartment because nothing on the trap path clears the file.
+
+#### Why this is a consequence of my own increment
+
+**Before increment 1 this was unremarkable.** Every object carried `VEDA_DOMAIN_ANY`, so ambient was
+not special -- the handler could bind anything, and so could everyone else. Closing the creation
+default is what turned ambient into a **root**, and it did so without noticing that **every trap
+handler runs in it**. A fix that concentrates authority has to be followed by asking who else stands
+in the place it was concentrated into.
+
+#### The real diagnosis: `mtvec` is a bare address in an address-less machine
+
+Trap entry sets `veda_pcc_object = VEDA_OBJECT_NONE` because **it has nothing else to set it to**.
+The machine has `veda_mepcc_object` for the *interrupted* identity -- nine occurrences in
+`veda_regs.sail` -- and **no handler object at all**: a search for `mtvec_object`, `handler_object`
+or `veda_mtvec` across the extension returns nothing, against that control.
+
+`mtvec` is an **address**. Every other control transfer in this architecture names an **object**:
+OCInvoke takes a sealed code capability, OCReturn takes a sentry, `veda.bind` takes an Object_ID.
+The trap vector is the one entry point that does not, so the trap is the one entry the machine cannot
+attribute -- and an unattributable entry can only be given the root identity or none, and those are
+the same thing here.
+
+#### Directions, none chosen
+
+1. **Give the handler an identity.** A trap-vector *object* rather than an address, so trap entry
+   sets `veda_pcc_object` to it and a handler binds under its own domain. This is the fix that
+   matches the architecture's own grain, and it is a real ISA change: `mtvec` would become
+   capability-shaped, which touches the RISC-V-standard CSR this core inherits.
+2. **Give the trap path the barrier the crossings have.** R71 gave OCInvoke and OCReturn a retain
+   mask; the trap path has none. Symmetric, and immediately refutable: the shipped switcher IS
+   `mtvec` in the scheduler tests and uses capabilities across the trap, so a blanket clear repeats
+   the shape that killed four earlier designs. It would need the same declare-what-survives discipline.
+3. **Accept and bound it.** R34 already accepted the ambient boot context as architecture. The honest
+   version of that here is to say that a trap handler is part of the trusted computing base by
+   construction, and to write down that the TCB now includes "may bind and re-stamp every object in
+   the machine" -- which is a much stronger statement than it was before increment 1.
+
+**Direction 1 is the one that fits the architecture; direction 3 is what is true today.** Recorded
+before choosing, because this register has four crossing-side designs in it that were refuted for
+being chosen before the cost was priced.
+
 ## Deliberately NOT done (rejected findings -- recorded so they are not re-raised)
 
 - **ODT-region authorization bypass via base-ISA store: rejected -- grounding was wrong.**
