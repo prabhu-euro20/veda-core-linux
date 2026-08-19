@@ -8011,3 +8011,81 @@ victim; it is the architecture telling it what to do.
 like the one R76 gave `set.domain` -- but that must be priced against the fact that paging is exactly
 what a Machine-mode pager legitimately does, which is the same tension R47 resolved for the ODA by
 scoping the *authority* rather than forbidding the *operation*.
+
+### R87. "The shipped switcher" is not built by any verification suite, and cannot be assembled on this machine at all
+
+**Status: VERIFIED FOUR WAYS. OPEN. This is a verification finding of exactly the class R46 exists for,
+and it weakens cost arguments this register has made five times.**
+
+`runtime/veda_sched_asm.S` is cited throughout this register as **the shipped switcher** -- the real
+software that must keep working, and therefore the honest price of a mechanism. R72 priced the
+copy-on-write carry bit against its save areas. R77 noted it OCInvokes from inside the handler. R83
+counted its 13 ordinary loads and stores as the measure of what purecap would cost. **Every one of those
+statements is true of the file, and none of them is true of anything that runs.**
+
+#### The four checks
+
+1. **No suite test includes it.** `grep -rn 'veda_sched_asm' sail_tests/*.S rtl/sim/*.S
+   difftest/probes/*.S` returns **four hits and all four are comments** -- *"the fix
+   runtime/veda_sched_asm.S depends on"*, *"(runtime/veda_sched_asm.S)"*, *"matching veda_sched_asm.S's
+   own established..."*, *"runtime/veda_sched_asm.S's own do_resume path"*. Not one is an `.include`.
+2. **`verification.sh` runs exactly four scripts** -- `run_veda_selfcheck_tests.sh`,
+   `run_veda_smoke_test.sh`, `run_difftests.sh`, `run_act4_tests.sh` -- and none of them builds it.
+3. **The one script that does build it cannot run here.**
+   `compiler/run_veda_sched_global_combo_test.sh:23` assembles it with
+   `toolchain/llvm-project/build/bin/llvm-mc`, and `toolchain/` contains only `riscv-collab-gcc`,
+   `sail-riscv` and `setup.sh`. **`llvm-project` is absent.** The script exits **1** and says
+   `crt0.S failed` -- its guards are correct; it is the toolchain that is missing.
+4. **No built ELF anywhere contains `saved_ra` or `saved_sp`**, two of the five symbols whose ordinary
+   accesses R83 counted.
+
+#### What IS verified, and it is not nothing
+
+The scheduler *behaviour* is covered -- by **self-contained reimplementations**:
+`rtl/sim/veda_smoke_m23_scheduler.S` and `sail_tests/vc_scheduler_cooperative_yield.S` build the same
+save-area / OCReturn / TSC pattern inside a single file. They pass, and they exercise the architecture.
+**What they are not is the runtime.**
+
+#### The correction this cost me, recorded because catching it is the point
+
+While measuring, I read `Length = 0x0020` (32 bytes) from `runtime/veda_sched_asm.S`'s object 167 and the
+symbol layout from `rtl/sim/veda_smoke_m23_scheduler.elf`, saw `thread_a_ok` and `thread_b_ok` sitting
+inside the window, and had a finding: *the switcher's private state capability covers the test's memory*.
+**It was wrong.** Those are two different files, and the test's own comment (`:174-178`) says the sharing
+is deliberate and its object is **48 bytes**, sized for exactly that: *"Length=0x0030 (48 bytes):
+thread_index@0, plus two new memory-backed flags this milestone adds -- thread_a_ok@8, thread_b_ok@16 --
+reusing this same capability rather than minting a new Object_ID."* **A Length from one file against an
+ELF from another is not a measurement.** Caught before it was recorded, which is the rule this register
+runs on -- and the same mis-step twice in one session (the earlier one was reading `tail`'s exit status
+as the script's).
+
+#### What this does and does not retract
+
+It does **not** retract R72, R77 or R83's technical content: the file's `OCS.C`/`OCL.C` spill sites, its
+`0x0030000C` save areas, its OCInvoke at `:268` and its 13 ordinary accesses are all really there, and
+the reasoning about what they imply for a mechanism stands **as reasoning about that code**.
+
+What it retracts is the **weight**. *"The shipped switcher would have to change"* reads as *"real,
+running software breaks"*, and the honest form is *"a real piece of source that nothing currently builds
+would have to change."* That is still a cost -- it is the reference implementation and the thing a real
+deployment would use -- but it is not evidence that a mechanism is reachable, and this register has been
+treating it as though it were.
+
+#### DECIDED: R83's step 2 does not start by converting that file
+
+Converting 13 ordinary accesses in a file no suite compiles would produce **exactly the zero corpus cost
+this register treats as a tell**. The order changes:
+
+1. **Get the switcher into the gate, or say plainly that it is out.** Either replace `llvm-mc` with the
+   `riscv-collab-gcc` assembler the other four suites already use -- the encodings are all `.insn`, so
+   there is no obvious dependence on LLVM's `+xveda` attribute for anything but validation -- or move the
+   file to `blocked/` with a reason, the way `difftest/run_difftests.sh` already forces for probes.
+   **A file that cannot be built cannot be a cost argument.**
+2. **Then** convert it, with the suite able to fail.
+3. The purecap conversion that *is* measurable today is the one in the **self-contained scheduler tests**,
+   which do run -- and `vc_scheduler_cooperative_yield.S` already uses `OCS.D` through a bound capability
+   for its own flags, so the pattern is proven; what is missing is turning purecap on and finding out
+   what breaks.
+
+**Not built here.** The measurement is what matters: **five cost arguments in this register rest on a
+file that nothing builds**, and that had to be said before another one was written.
