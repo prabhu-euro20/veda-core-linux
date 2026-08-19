@@ -6606,6 +6606,102 @@ The trap vector is the one entry point that does not, so the trap is the one ent
 attribute -- and an unattributable entry can only be given the root identity or none, and those are
 the same thing here.
 
+#### Direction 1 PROTOTYPED, MEASURED, AND THEN REFUTED BY THE OFFICIAL DOCUMENTS
+
+**I built it, I was pleased with the number, and the number was the tell.** Kept in full because the
+refutation is worth more than the prototype.
+
+**What I built.** A fourth SCR beside ODA, TSC and SSC -- `veda_mtcc`, selector `0b00011`, verified
+free -- holding the handler's own capability, with `veda_pcc_save_and_reset` sourcing identity **and**
+bounds from it when tagged. Modelled on CHERI ISAv9's **SCR 28, "Machine trap code capability (MTCC)
+... Extends mtvec"**. Untagged at reset, so the machine behaves exactly as before until one is
+installed.
+
+**What I measured.** Corpus cost **126/126, zero**. And with an MTCC installed by hand, the handler's
+`veda.bind` of an object nobody had delegated **trapped with `mtval = 0xCB`** -- `cap_idx = 6`, cause
+`0x0B` DOMAIN_VIOLATION. The escalation closes.
+
+**WHY THE ZERO IS THE REFUTATION.** Veda-Core's software installs its trap vector with a plain
+`csrw mtvec`. Under a window design that write reaches the **address** and nothing else, so the
+identity stays at its untagged reset sentinel -- **which in this architecture means root**. The corpus
+cost is zero *because the mechanism does nothing for any software that exists*. I would have shipped a
+register, an SCR selector, an instruction arm and a legalisation story, and the machine's behaviour on
+a trap would be bit-identical to today's. **That is not a fix; it is a fix-shaped object** -- the same
+shape this register already refuses under "attenuation is advisory by default" and under R10's
+half-feature.
+
+**AND THE BOOTSTRAP CANNOT BE FIXED BY A RESET VALUE, WHICH BOTH PRIOR SYSTEMS CONCEDE IN WRITING.**
+CHERI ISAv9 Table 4.3 resets MTCC to **infinity** -- the root capability, which §3.6.1 defines as tag
+set, base 0, length 2^XLEN, **all permission bits set**. CHERIoT ISA v1.0 Table 7.2 resets MTCC to
+**root-X**, which §7.13.1 defines as carrying `PERMIT_ACCESS_SYSTEM_REGISTERS` over the whole address
+space. **Both trap vectors boot holding root authority**, and CHERIoT §7.11 states the alternative
+plainly: *"In the case of an untagged MTCC this will result in an unrecoverable exception loop."*
+A capability-shaped vector therefore moves the hole from *always root* to *root until software narrows
+it*. It does not close it.
+
+#### What the official documents DO settle, and it changes the design
+
+**The standard permits the window, and that was never the question.** RISC-V Privileged v20260120 §2.7
+already contemplates a CSR that is a narrow window onto a wider architectural register -- *"an explicit
+write to the CSR modifies only the register's least-significant XLEN bits, leaving the upper bits
+unchanged"* -- and §2 says standard CSRs *"may have side effects on writes"*. `mtvec` is **WARL in both
+fields** (§3.1.7), and §2.3.3 requires that *"implementations will not raise an exception on writes of
+unsupported values to a WARL field"*.
+
+**The conformance rule that actually bites** is §4.2's note: software that sets no custom state *"must
+continue to execute as specified by all relevant RISC-V standards, or the hardware is not
+standard-conforming."* A window whose hidden fields change what a `csrw`-only program observes on a
+trap is exactly what that forbids.
+
+**CHERIoT ABOLISHED the window, and that is the strongest single datum in the study.** §7.10: MTCC
+*"replaces"* mtvec, and *"attempting to access the legacy RISC-V CSR via the CSR\* instructions results
+in a Reserved Instruction exception."* Its authors began from CHERI-RISC-V's window, knew it
+intimately, and removed it. **The window is the hazard; removing the window removes the hazard.**
+
+**Direct-only is explicitly permitted**, which deletes a problem before it is inherited. §3.1.7: *"The
+mtvec register must always be implemented, but can contain a read-only value. If mtvec is writable, the
+set of values the register may hold can vary by implementation."* CHERIoT takes exactly that route
+(§7.10: *"Only direct mode is supported (not vectored)"*), and it had to -- **ISAv9 never specifies how
+MODE interacts with a capability address at all; the word "vectored" does not appear anywhere in
+TR-987.** Recorded as a gap in the source rather than papered over.
+
+**A second gap, recorded rather than reconstructed**: TR-987 gives `legalize_tcc` only as a type
+signature (§7.3) and three call sites; **the body is not in the document**. What it does specify is the
+required behaviour in prose (§4.3.6): apply the CSR's own WARL legalisation to the capability's
+address, clear the tag when a sealed capability is written to an SCR with non-preserved bits, and clear
+the tag but keep address and metadata on unrepresentability.
+
+**What CHERI actually gives a handler, which is the part worth copying.** §3.4.7: PCC is *replaced* by
+the trap code capability, not widened. §3.11.1: *"Normally, code executing in lower protection rings has
+access to privileged functions by virtue of AMBIENT AUTHORITY. CHERI permits that ambient authority to
+be constrained via capability permissions on the program-counter capability."* The teeth are §4.3.5
+Table 4.2's **whitelist**: reading or writing **any** CSR requires `PERMIT_ACCESS_SYSTEM_REGISTERS` on
+PCC, with only the counters and the floating-point control CSRs exempt. On CHERIoT there is no ring
+dimension at all (§7.9), so a handler's authority is *precisely* its vector's. **That is the property
+Veda-Core wants: authority wholesale from a named register, with no ambient widening.**
+
+#### DECIDED: build the IDENTITY, not the capability -- and make the narrowing an OBLIGATION
+
+1. **Keep `mtvec` as the standard address.** Direct-only, MODE read-only zero, which §3.1.7 permits
+   outright and which deletes the MODE-in-a-capability-address problem ISAv9 never specified.
+2. **Give the trap vector a named `Object_ID`**, reachable only by a Machine-only custom instruction.
+   Not bounds, not `otype`, not address legalisation -- **Veda-Core has no addresses in its security
+   model**, and importing CHERI's whole capability shape drags in machinery that answers CHERI's
+   problem rather than this one. What is needed is the identity binding.
+3. **Make the narrowing MANDATORY rather than reset-defaulted.** A root-authority reset is
+   unavoidable, so the fix cannot live in the reset value -- it must live in an **obligation**: the
+   machine must not be permitted to leave the bootstrap domain while the trap vector still carries the
+   sentinel identity. That is the same instrument as R10's hard obligation, and it is exactly what
+   neither CHERI nor CHERIoT provides, because both accept a trusted loader as the thing that narrows
+   MTCC. **Veda-Core, whose premise is that identity is not optional, should not accept a trusted
+   loader on this path.**
+
+Left open deliberately: whether a legacy `csrw mtvec` should fault the way CHERIoT §7.10 makes it
+fault. If the identity is genuinely mandatory, a write that installs an address without an identity
+has nothing sensible to do except trap -- but that is a conformance decision with its own cost, and
+this register contains four designs refuted for being chosen before they were priced.
+
+
 #### Directions, none chosen
 
 1. **Give the handler an identity.** A trap-vector *object* rather than an address, so trap entry
