@@ -7724,3 +7724,80 @@ other bricks.
 
 **Measured cost of step 3 if taken today: 8 of the 12 tests that touch `0x7C5` would be unable to halt.**
 That is not an argument against it; it is the measurement that says step 1 must come first.
+
+### R84. A capability cannot reach a device, so a purecap machine has no I/O -- and this is why R83's first increment could not be built
+
+**Status: MEASURED BY BUILDING R83 STEP 1 AND WATCHING IT FAIL IN EXACTLY ONE PLACE. OPEN. The fix is
+upstream machinery this fork already has and does not use.**
+
+R83's first increment was a purecap-safe halt: signal completion through a bound `tohost` object with
+`OCS.D` instead of the two ordinary `sw` stores, so that a test could finally run its whole steady state
+with `veda_mode` set. It was built. **Every row passed.** Traced instruction by instruction:
+
+```
+  0x7C5 reads 1                          purecap is ON and stays on
+  OCS.D + OCL.D round-trip 0xC0FFEE      capability access works under purecap
+  an ordinary ld                         REFUSED, 1 trap, cause 0x07
+  execution reaches self_loop_pass_pc_0  every check passed, the halt macro ran
+  ... and then it spins forever          THE SIGNAL NEVER ARRIVES
+```
+
+#### The reason, read at source
+
+The upstream checked memory path routes devices and RAM in one place, `sys/mem.sail:461-469`:
+
+```
+if   within_mmio_writable(paddr, split_width)
+then match mmio_write(paddr, split_width, write_value) { ... }
+else { let v = write_ram(wk, paddr, split_width, write_value, meta); ... }
+```
+
+`within_mmio_writable` (`sys/platform.sail:354-357`) covers the **CLINT**, the **signature** region and
+**HTIF**. And the `else` branch shows the checked path **already carries `meta`** -- the capability tag.
+So the upstream function is **both MMIO-aware and tag-carrying**.
+
+**Veda's entire OCL/OCS family bypasses it.** `postlude/step_ext.sail` says so in its own words, and
+says it was deliberate: the eight Veda call sites *"use `read_ram`/`write_ram` directly
+(`core/phys_mem_interface.sail`), never `vmem_read`/`vmem_write`, confirmed via exhaustive grep ... so
+this hook is architecturally unreachable from any legitimate Veda capability-checked access, **by
+construction, not by convention**."*
+
+That reasoning is sound for what it was written for -- keeping purecap's own hook off the capability
+path. **It also removed the device path, and nothing noticed, because purecap has never been on (R83)
+and no test has ever attempted capability I/O.**
+
+> **A capability access reaches RAM and nothing else. Purecap forbids the ordinary accesses that CAN
+> reach a device. There is no third path -- so a Veda machine running under purecap has no console, no
+> timer, and no way to say it finished.**
+
+#### Why this matters well beyond a halt macro
+
+1. **Phase 3 is interrupt and timer architecture.** The timer is the **CLINT**, and the CLINT is MMIO.
+   A purecap Veda machine cannot read `mtime` or write `mtimecmp` through a capability today.
+2. **It is the concrete answer to "which software would have had to change"** for purecap. The answer
+   turns out to be *all of it, and it cannot, until this is fixed* -- which is a far stronger statement
+   than the 13 ordinary loads and stores in the switcher that R83 counted.
+3. **It explains R83's shape.** Purecap is enabled by nothing not merely because software is
+   old-fashioned, but because **under purecap no program can produce output at all.**
+
+#### The fix, and it adds no new mechanism
+
+Route Veda's eight capability memory sites through the **checked** path (`mem_read_priv_meta` /
+`mem_write_value_priv_meta`) instead of `read_ram`/`write_ram`. That path is already tag-carrying, so
+capability round-trips through RAM are unaffected, and already MMIO-aware, so a capability whose window
+covers a device region reaches the device.
+
+**The one design question it raises, and it must be answered before building**: `mmio_write` takes no
+`meta`, so a capability **stored into** a device loses its tag. That is correct -- a device register
+cannot hold a capability -- and it matches CHERI, which likewise does not tag device memory. But it must
+be made an explicit rule with a test rather than an accident of the upstream signature. The data
+family (`OCL.D`/`OCS.D`) is what I/O needs; the capability family (`OCL.C`/`OCS.C`) against a device
+region should be **refused**, not silently tag-stripped.
+
+**Not built here.** The measurement is recorded, the fix is identified, and the price -- eight call
+sites, a new refusal rule, and its test on both layers -- has not been paid or measured. What is now
+known and was not: **R83's step 1 is not a macro change, it is a memory-path change**, and the whole
+purecap programme sits behind it.
+
+**Kept in the repo as `sail_tests/poc_r84_purecap_has_no_io.S`**, deliberately as a `poc_` because it
+cannot pass: every check in it succeeds and the machine then has no way to say so.
