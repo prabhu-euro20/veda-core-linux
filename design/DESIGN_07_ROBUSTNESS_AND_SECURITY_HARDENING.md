@@ -7215,3 +7215,114 @@ files above. **Not chosen here**, because this register holds four designs refut
 before they were priced, and because the honest question underneath is whether **descending the
 privilege ladder should also drop identity to nobody** -- which is a larger statement about what a
 Veda process IS, and belongs to the principal-granularity decision that is already open.
+
+### R80. mtvec MODE was part of the trap TARGET ADDRESS -- a standards violation, and a control-flow divergence the differential suite could not see
+
+**Status: MEASURED ON BOTH REAL SIMULATORS, CLOSED ON BOTH LAYERS, BOTH HALVES PROVED LOAD-BEARING.
+Sail 127/127, RTL 112/112, ACT4 51/51, differential 26/26, `verification.sh` exit 0.**
+
+Found while verifying decision point 1 of R77 -- *"keep `mtvec` as the standard address, Direct-only"* --
+which had been taken on architectural grounds. It turns out to have been closing a live defect.
+
+#### The defect
+
+The RTL stored the mtvec write **verbatim** and used the register **raw** as the trap target:
+
+```
+veda_core.tlv:5663   $mtvec = ... ? >>1$csr_wdata : >>1$mtvec;      // no mask
+veda_core.tlv:6431   $alt_pc = $veda_trap_taken ? $mtvec : ...;     // no MODE decode, no +4*cause
+```
+
+So **`mtvec[1:0]` became part of the trap target address.** RISC-V Privileged section 3.1.7 forbids
+exactly that, verbatim:
+
+> *"Note that the CSR contains only bits XLEN-1 through 2 of the address BASE. When used as an address,
+> the lower two bits are filled with zeroes to obtain an XLEN-bit address that is always aligned on a
+> 4-byte boundary."*
+
+This is a standards violation on its own terms, independent of any Sail comparison.
+
+#### Measured, on both real simulators, same ELF -- not reasoned about
+
+**Probe A, two instructions, no trap needed.** `csrwi mtvec, 2` then `csrr`:
+
+```
+                                      Sail          RTL
+  csrwi mtvec, 2   (MODE 0b10)        0x0           0x2
+  csrrs mtvec, 3   over 0x80001000    0x80001000    0x80001003
+  MODE 0b01 Vectored (SUPPORTED)      0x80001001    0x80001001    <- AGREE, the control
+```
+
+The control row is what makes the measurement mean something: a **supported** mode is stored
+identically by both, so the disagreement is specifically the reserved-MODE legalisation arm.
+
+**Probe B, and this is the one that matters.** Install the handler with **MODE = 0b01 Vectored** -- a
+**legal** RISC-V mode, and one both layers stored **identically** as `0x80000051` -- then take one
+`ecall`:
+
+```
+  both layers hold mtvec = 0x80000051                        IDENTICAL
+  Sail: pc <- base with the low two bits zeroed = 0x80000050
+        handler runs, mret returns, sentinel 0xC0DE written
+  RTL : pc <- $mtvec = 0x80000051, fetches ONE BYTE INTO the handler from its
+        byte-granular instruction array, executes a shifted stream, NEVER RETURNS
+```
+
+**A trap vector both layers agree they hold sends one into the handler and the other one byte into it,
+permanently.** The trap path is the recovery path; a divergence that ends execution there is the worst
+place in the machine to have one.
+
+#### Why 25 differential probes could not see it, which is the general lesson
+
+Across **all 229 mtvec-write sites in the whole repository**, exactly two take their value from an
+immediate rather than a label, and exactly one installs a non-zero MODE. Every other site is
+`la` + `csrw`, which is 4-byte aligned by construction, so **the divergent bits were never exercised**.
+
+> **A suite that only ever writes LEGAL values cannot find a WARL defect.** Write-Any-Read-Legal is a
+> rule about what happens to *illegal* inputs, and a corpus built from correct software contains none.
+
+#### The fix, both halves, and each proved load-bearing by neutering it
+
+- **RTL**: the write arm masks MODE -- `{>>1$csr_wdata[63:2], 2'b0}`. `$alt_pc` is then aligned by
+  construction and needs no change.
+- **Sail**: `mtvec.vectored.supported = false` in both configs the project uses, so `legalize_tvec`'s
+  `TV_Vector` arm restores the old MODE (0 from reset). Section 3.1.7 permits this outright --
+  *"If mtvec is writable, the set of values the register may hold can vary by implementation"* -- and
+  CHERIoT ISA v1.0 section 7.10 takes the same route (*"Only direct mode is supported"*).
+
+**The two layers now agree BY CONSTRUCTION rather than by test.** The alignment half of `legalize_tvec`
+needed no mirror at all, and that is measured rather than assumed: both configs set
+`base_alignment = 2` and the mask fires only `if base_alignment > 2`, so **it is dead code in this
+fork** and MODE was the only divergence.
+
+**Load-bearing proof, each half neutered in turn:**
+
+```
+  RTL mask removed, Sail kept    -> RTL 111/112 (m9 fails) and p24_mtvec_mode DIVERGES
+  Sail reverted, RTL mask kept   -> Sail 126/127 (vc_r80 fails) and p24_mtvec_mode DIVERGES
+  both in place                  -> 127/127, 112/112, 51/51, 26/26, exit 0
+```
+
+#### The corpus cost, and the R68 shape caught again -- by the suite, on the first run
+
+**One test, two lines.** `rtl/sim/veda_smoke_m9.S` uses mtvec as a scratch register to exercise CSRRS
+OR-semantics and asserted the result was `0xFFFF` -- **a value section 3.1.7 forbids mtvec to hold**.
+It is now `0xFFFC`, and the CSRRS semantics under test are unchanged.
+
+I patched **one** of the two sites and declared it done. The first full run failed it. The second site
+is the *"a `csrr` must not write the CSR"* check four lines later, asserting the same literal. Rather
+than fix that one too, I wrote a scan over **instruction operands** -- every `csrr <reg>, mtvec`
+followed by a comparison -- across all three corpora, which found both m9 sites and proved the other
+three comparison sites hold `la`-derived, `.balign 4` addresses and are unaffected. **Sixth time this
+project has been bitten by a rule applied to a subset of its sites, and the first time the suite caught
+it before I claimed anything.**
+
+#### Two tests added, and what each one refuses
+
+- `sail_tests/vc_r80_mtvec_direct_only.S` -- five rows. Row 4 is the **anti-vacuity control**: an
+  already-aligned write must survive **exactly**, so a core that answered zero to every mtvec read
+  cannot pass rows 1-3 for the wrong reason. Row 5 installs the real handler with MODE = 0b01 and takes
+  a genuine trap.
+- `difftest/probes/p24_mtvec_mode.S` -- the same five rows compared **cross-layer**, which is the
+  instrument that should have caught this and had no probe that could. Its signature carries real
+  values, not zeros: `0`, `0x80001000`, `0x80002000`, `0x80003000`, `0xC0DE`, identical on both layers.
