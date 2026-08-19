@@ -8179,6 +8179,49 @@ each; the shipped file carried zero.**
 declaration that works, since the sentry lives in region 0, and exactly what the mirrors do. Sharing is a
 declaration, which is R52's own doctrine.
 
+#### R87(b) -- AND THE GUARD THAT MADE THE FIFTH FAULT UNDIAGNOSABLE IS NOW A REPORTING EXIT
+
+**Sail 133/133**, everything else unchanged, exit 0.
+
+The guard was `bne x28, x29, switcher_entry` -- **a branch to itself** -- with the comment *"not our
+ecall -- ignore (real fault recovery out of scope this pass)"*. Any trap that was not the scheduler's
+own `ECALL` spun the machine forever with `mcause`, `mtval` and `mepc` unread.
+
+**That is not merely incomplete, and the cost was measured rather than asserted**: of the five faults
+this file hit, the first four were readable from an instruction trace, and the fifth was not diagnosable
+at all until a scratch build replaced the spin -- at which point the cause fell out in **one run**.
+
+> **A handler that cannot report its own unexpected fault is the thing that makes every LATER fault
+> undiagnosable.** It does not fail once; it removes the instrument.
+
+**The exit, and why it is a return rather than a halt.** It records `mcause`/`mtval`/`mepc` into three
+new fields and then takes the **same `saved_ra`/`saved_sp` restore that `return_to_caller` already
+performed**, returning `0xFFFFFFFF` -- which no real yield count can be, since `veda_sched_run_asm`
+returns `uint32_t`. It deliberately does **not** halt the machine: **the switcher is a library, and
+deciding a fault is fatal is the caller's business, not its own.**
+
+Ordinary stores, matching every other access to these scalars in the file. Converting the whole set --
+and growing object 167 from `0x20` to cover `saved_sp`, which it currently misses by exactly 8 bytes --
+is R83 step 2, and doing it here for three fields alone would leave the file half-converted.
+
+**`sail_tests/vc_r87b_switcher_fault_exit.S`** makes a thread fault deliberately (an ordinary load
+inside an Execute-only 8-byte compartment, refused by `ext_data_get_addr`'s second arm whether or not
+`veda_mode` is set) and checks **four specific things**, because *"it reported something"* is not a test:
+
+```
+  A  veda_sched_run_asm returns 0xFFFFFFFF, not a yield count
+  B  fault_cause == 0x18                       the Veda trap cause
+  C  fault_tval  == (17 << 5) | 0x07           cap_idx 17, PURECAP_VIOLATION
+  D  fault_epc   == the EXACT faulting PC
+```
+
+Row C's `17` is that path's own out-of-range `cap_idx` sentinel, and row D pins the record to the
+instruction rather than to the fact that something was written. **The anti-vacuity control is the
+companion file**: `vc_r87_shipped_switcher_gated.S` runs the same switcher with well-behaved threads and
+gets `4` back, so a switcher that always reported a fault cannot pass both.
+
+**Neuter proof**: restore the spin and `vc_r87b_switcher_fault_exit` fails, 132/133.
+
 #### CLOSED. THE SHIPPED SWITCHER RUNS, PASSES, AND IS NOW IN THE GATE
 
 `sail_tests/vc_r87_shipped_switcher_gated.S` -- **Sail 132/132**, RTL 112/112, ACT4 51/51, differential
