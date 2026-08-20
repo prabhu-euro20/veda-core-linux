@@ -8269,3 +8269,51 @@ this register treats as a tell**. The order changes:
 
 **Not built here.** The measurement is what matters: **five cost arguments in this register rest on a
 file that nothing builds**, and that had to be said before another one was written.
+
+### R88. Fourteen tests sit in the test directory that the runner has never globbed -- and the three sampled do not pass
+
+**Status: MEASURED. OPEN. Found by asking, after R87, whether anything ELSE is in the position of being
+cited but not run. This is R87's shape one level up, and it is worse, because these files are in
+`sail_tests/`.**
+
+`sail_tests/run_veda_selfcheck_tests.sh:38` globs **`vc_*.S`**. Fourteen test files in that same
+directory are named `veda_*.S` -- an earlier convention -- so **the runner has never matched them**:
+
+```
+  veda_test.S            veda_neg.S               veda_odt_lifecycle_test.S
+  veda_cseal_test.S      veda_cseal_unauth_neg.S  veda_cunseal_test.S
+  veda_csetbounds_test.S veda_capquery_test.S     veda_seal_enforce_neg.S
+  veda_atomic_test.S     veda_oca_test.S          veda_oca_neg.S
+  veda_nmc_add_test.S    veda_nmc_add_neg.S
+```
+
+Between them they name **CSeal, CUnseal, CSetBounds, OCA, NMC-add, the atomics, the capability query
+family, the ODT lifecycle, and five negatives.** **Three were sampled and all three fail.**
+
+**Why this is worse than R87.** `runtime/veda_sched_asm.S` at least *looked* like library code. These sit
+in the **tests** directory, are **named** as tests, and would be counted as coverage by anyone reading
+the directory -- including this register.
+
+#### The wider measurement that produced it
+
+Of **312** `.S` files in the implementation repo, **38 are unreachable by any of the four suites**:
+
+| class | count | verdict |
+|---|---|---|
+| `poc_*` probes | 8 | **correct** -- deliberately not run, since a PASS means an escalation works |
+| `sail_tests/pending/` | 1 | **correct** -- explicitly parked |
+| `veda_*.S` orphans | 14 | **R88 -- tests that look like coverage and are not** |
+| `runtime/*.S` | 3 | `crt0.S`, `veda_rt_asm.S`, `veda_rt_trap_catcher.S` -- **exactly where `veda_sched_asm.S` was before R87**, and R83 counted their ordinary loads/stores as purecap cost |
+| `compiler/*.S` | 12 | the compiler-path demos, gated behind the same absent `llvm-mc` |
+
+#### DECIDED: the fix is a GUARD, not a sweep
+
+Renaming fourteen files would fix these fourteen and prevent nothing. **`difftest/run_difftests.sh`
+already solves this class** -- it **FATALs** when a probe exists in `probes/` and is not in its expected
+table, with the comment that a dropped entry *"becomes a test nobody runs and nobody misses."* That
+guard exists for probes and for nothing else.
+
+**The same guard belongs on `sail_tests/` and `rtl/sim/`**: any `.S` in a test directory must either be
+globbed by the runner, or be a `poc_`, or sit in `pending/` with a reason -- and anything else is a hard
+error. **That makes this class impossible to recreate**, which is worth more than fixing the fourteen
+instances, and it is why the fourteen are recorded here rather than quietly renamed.
