@@ -8317,3 +8317,51 @@ guard exists for probes and for nothing else.
 globbed by the runner, or be a `poc_`, or sit in `pending/` with a reason -- and anything else is a hard
 error. **That makes this class impossible to recreate**, which is worth more than fixing the fourteen
 instances, and it is why the fourteen are recorded here rather than quietly renamed.
+
+#### R88 CLOSED. BOTH GUARDS BUILT, THE FOURTEEN TRIAGED, AND ONE MORE FILE GATED
+
+**Sail 134/134**, RTL 112/112, ACT4 51/51, differential 28/28, exit 0.
+
+**The guards.** `sail_tests/run_veda_selfcheck_tests.sh` now refuses to run if any `.S` in that directory
+is not one of four things -- globbed (`vc_*`), a deliberate probe (`poc_*`), `.include`d by a test, or
+parked in a subdirectory. **It fired immediately on the real state: 14 files, exit 2.**
+`rtl/run_veda_smoke_test.sh` gets the same rule in the shape that runner needs -- it names its tests
+explicitly rather than globbing, so a `.S` there must be named somewhere in the script. **That directory
+measured clean, and the guard is there because `sail_tests/` was "clean" too until it was measured.**
+
+*The RTL guard's first draft read `$0` and broke after the script's own `cd`. That file already carried
+`SELF`, resolved before the `cd`, with R49's comment saying it exists because "the coverage guard at the
+end of this file has to read this file, and after `cd` a relative path breaks." **The lesson had already
+been paid for once; I just did not use it.***
+
+**The fourteen: superseded, not lost coverage -- and that was measured, not assumed.** Every mechanism
+they name is covered by the live corpus, counted by encoding across all three suites: CSeal 51, queries
+63, populate 74, OCA 13, destroy 10, NMC-add 4, Veda-Atomic 4/1/9, CSetBounds 3/4/4, CUnseal 1/0/1. They
+are parked in `sail_tests/superseded/` with a README recording, per file, what it named and where that
+mechanism lives now -- **kept rather than deleted, because nothing here is discarded.**
+
+> **The first version of that coverage table was WRONG, and it is worth saying how.** CSetBounds and the
+> Veda atomics initially read as **zero** coverage -- from encodings I guessed instead of looking up. The
+> real ones are `funct7 = 0x08` (`veda_cap_insts.sail:206`) and opcode **`0x2b`**, not `0x0b`
+> (`veda_atomic_insts.sail:61`). Had the guessed numbers been trusted, two files would have been declared
+> lost coverage and repaired at length for nothing. **A guessed encoding is not a measurement.**
+
+**And the runtime files, classified rather than lumped.** Of the three,
+**`runtime/veda_rt_trap_catcher.S` is now gated** by `sail_tests/vc_r88_rt_trap_catcher.S` -- it
+assembles with the suites' own assembler and has zero undefined symbols. Its four rows include the one
+that matters: **row C proves execution RESUMES after the trap**, which is the single thing this catcher
+does differently from every other handler in the corpus (its own comment: the others *"halt permanently
+from inside the handler -- reaching the handler correctly IS their terminal pass condition"*), and
+nothing was gating it. The other two **cannot** be gated here, for reasons now measured rather than
+assumed:
+
+| file | blocked by |
+|---|---|
+| `runtime/veda_rt_asm.S` | uses real **mnemonics** (`veda.odt.populate.fast`, `cgettag`, `ocl.d`, `veda.bind`) rather than `.insn`, so it needs LLVM's `+xveda`. **`veda_sched_asm.S` was gateable precisely because it used `.insn` throughout** |
+| `runtime/crt0.S` | needs `main`, `_stack_top`, `__bss_start/end` -- the C runtime, so it needs clang |
+| `compiler/*.S` (12) | the same absent LLVM/C toolchain |
+
+**That is a real project fact and not a shrug**: 13 of the 38 unreachable files are blocked on a
+toolchain this machine does not have, and **the honest response is to say so in the register rather than
+let them read as coverage.** The guards make the *test* directories self-policing; the compiler-path
+files are a separate, named debt.
